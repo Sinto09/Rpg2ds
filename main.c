@@ -1,11 +1,10 @@
 /*
- * RPG 2DS - Etape 1 : la base
+ * RPG 2DS - Etape 2 : l'editeur de cartes
  *
- *  - Ecran titre avec menu (tactile, croix + A)
- *  - Carte vue de dessus avec camera qui suit le joueur
- *  - Deplacement : croix ou stick, B pour courir
- *  - Ecran du bas : mini-carte et infos
- *  - START quitte, SELECT retourne au titre
+ *  - Ecran titre : Jouer / Editeur / Quitter
+ *  - Jeu : carte vue de dessus, deplacement (croix/stick, B = courir)
+ *  - Editeur : ecran du bas = zone de dessin (stylet), ecran du haut = carte entiere
+ *  - La carte est sauvegardee sur la carte SD : sdmc:/3ds/rpg2ds/map1.bin
  *
  * Compilation : devkitARM + libctru + citro2d (voir Makefile)
  */
@@ -15,6 +14,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* ---------- Constantes ---------- */
 
@@ -27,10 +27,17 @@
 #define MAP_W 50
 #define MAP_H 30
 
+#define VIEW_W (BOT_W / TS)   /* tuiles visibles dans l'editeur : 20 */
+#define VIEW_H (BOT_H / TS)   /* 15 */
+
 #define PW 12      /* hitbox du joueur */
 #define PH 12
 
 #define COL(r, g, b) C2D_Color32((r), (g), (b), 255)
+
+#define SAVE_DIR    "sdmc:/3ds/rpg2ds"
+#define SAVE_FILE   "sdmc:/3ds/rpg2ds/map1.bin"
+#define HEADER_SIZE 9
 
 /* ---------- Tuiles ---------- */
 
@@ -44,9 +51,10 @@ typedef struct {
 
 static TileDef TILES[T_COUNT];
 static u8 map[MAP_H][MAP_W];
+static int spawnTX = 12, spawnTY = 13;   /* point de depart (en tuiles) */
 
 static void initTiles(void) {
-    TILES[T_GRASS] = (TileDef){ "Herbe",  COL(76, 160, 64),  false };
+    TILES[T_GRASS] = (TileDef){ "Herbe",  COL(76, 160, 64),   false };
     TILES[T_WALL]  = (TileDef){ "Mur",    COL(120, 120, 130), true };
     TILES[T_WATER] = (TileDef){ "Eau",    COL(50, 110, 200),  true };
     TILES[T_TREE]  = (TileDef){ "Arbre",  COL(30, 100, 40),   true };
@@ -55,7 +63,7 @@ static void initTiles(void) {
     TILES[T_DOOR]  = (TileDef){ "Porte",  COL(110, 70, 30),   false };
 }
 
-/* ---------- Generation de la carte ---------- */
+/* ---------- Carte par defaut ---------- */
 
 static unsigned rngState = 12345;
 
@@ -114,6 +122,65 @@ static void buildMap(void) {
         if (map[y][x] == T_GRASS)
             map[y][x] = T_TREE;
     }
+
+    spawnTX = 12;
+    spawnTY = 13;
+}
+
+/* ---------- Sauvegarde / chargement (carte SD) ---------- */
+
+static bool saveMap(void) {
+    u8 header[HEADER_SIZE] = { 'R', 'P', 'G', '2', 1, MAP_W, MAP_H, 0, 0 };
+    FILE *f;
+    bool ok;
+
+    header[7] = (u8)spawnTX;
+    header[8] = (u8)spawnTY;
+
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(SAVE_DIR, 0777);
+
+    f = fopen(SAVE_FILE, "wb");
+    if (f == NULL)
+        return false;
+
+    ok = (fwrite(header, 1, HEADER_SIZE, f) == HEADER_SIZE) &&
+         (fwrite(map, 1, sizeof map, f) == sizeof map);
+    fclose(f);
+    return ok;
+}
+
+static bool loadMap(void) {
+    static u8 tmp[MAP_H][MAP_W];
+    u8 header[HEADER_SIZE];
+    FILE *f;
+    int x, y;
+
+    f = fopen(SAVE_FILE, "rb");
+    if (f == NULL)
+        return false;
+
+    if (fread(header, 1, HEADER_SIZE, f) != HEADER_SIZE ||
+        memcmp(header, "RPG2", 4) != 0 || header[4] != 1 ||
+        header[5] != MAP_W || header[6] != MAP_H ||
+        fread(tmp, 1, sizeof tmp, f) != sizeof tmp) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    for (y = 0; y < MAP_H; y++)
+        for (x = 0; x < MAP_W; x++)
+            map[y][x] = (tmp[y][x] < T_COUNT) ? tmp[y][x] : T_GRASS;
+
+    spawnTX = (header[7] < MAP_W) ? header[7] : 1;
+    spawnTY = (header[8] < MAP_H) ? header[8] : 1;
+    return true;
+}
+
+static void loadOrDefault(void) {
+    if (!loadMap())
+        buildMap();
 }
 
 /* ---------- Joueur et camera ---------- */
@@ -155,21 +222,43 @@ static void updateCamera(void) {
     if (camY > maxY) camY = maxY;
 }
 
-static void startGame(void) {
-    buildMap();
-    player.x = 12 * TS + 2;
-    player.y = 13 * TS + 2;
-    player.dir = 0;
-    updateCamera();
+/* place le joueur sur la tuile libre la plus proche de (tx, ty) */
+static void placePlayerAtTile(int tx, int ty) {
+    int r, dx, dy;
+
+    for (r = 0; r < MAP_W; r++) {
+        for (dy = -r; dy <= r; dy++) {
+            for (dx = -r; dx <= r; dx++) {
+                int x = tx + dx, y = ty + dy;
+                if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H)
+                    continue;
+                if (!blocked(x * TS + 2, y * TS + 2)) {
+                    player.x = x * TS + 2;
+                    player.y = y * TS + 2;
+                    return;
+                }
+            }
+        }
+    }
+    player.x = TS + 2;
+    player.y = TS + 2;
 }
 
 /* ---------- Etat global ---------- */
 
-enum { S_TITLE, S_PLAY };
+enum { S_TITLE, S_PLAY, S_EDIT };
 
 static int state = S_TITLE;
 static bool running = true;
+static bool fromEditor = false;   /* le jeu a ete lance depuis l'editeur */
 static C2D_TextBuf g_textBuf;
+
+/* editeur */
+static int editTile = T_GRASS;    /* tuile choisie */
+static int ecx = 0, ecy = 0;      /* coin haut-gauche de la zone affichee (en tuiles) */
+static bool painting = false;     /* le stylet a commence a toucher dans l'editeur */
+static const char *editMsg = "";
+static int editMsgTimer = 0;
 
 /* ---------- Boutons ---------- */
 
@@ -180,15 +269,14 @@ typedef struct {
 } Button;
 
 static Button titleButtons[3] = {
-    { 50,  40, 220, 44, "Jouer",              true  },
-    { 50,  95, 220, 44, "Éditeur (bientôt)",  false },
-    { 50, 150, 220, 44, "Quitter",            true  },
+    { 50,  40, 220, 44, "Jouer",   true },
+    { 50,  95, 220, 44, "Éditeur", true },
+    { 50, 150, 220, 44, "Quitter", true },
 };
 
 static Button playTitleButton = { 222, 10, 88, 40, "Titre", true };
 
 static int sel = 0;
-static int msgTimer = 0;
 
 static bool inRect(const Button *b, int px, int py) {
     return px >= b->x && px < b->x + b->w && py >= b->y && py < b->y + b->h;
@@ -233,24 +321,59 @@ static void drawButton(const Button *b, bool selected) {
     drawTextInRect(b->label, b->x, b->y, b->w, b->h, 0.6f, txt);
 }
 
-/* ---------- Mise a jour ---------- */
+/* ---------- Changements d'etat ---------- */
+
+static void startPlay(void) {
+    placePlayerAtTile(spawnTX, spawnTY);
+    player.dir = 0;
+    playTitleButton.label = fromEditor ? "Éditeur" : "Titre";
+    updateCamera();
+    state = S_PLAY;
+}
+
+static void leavePlay(void) {
+    if (fromEditor) {
+        state = S_EDIT;
+        painting = false;
+    } else {
+        state = S_TITLE;
+    }
+    fromEditor = false;
+}
+
+static void clampEditor(void) {
+    if (ecx < 0) ecx = 0;
+    if (ecx > MAP_W - VIEW_W) ecx = MAP_W - VIEW_W;
+    if (ecy < 0) ecy = 0;
+    if (ecy > MAP_H - VIEW_H) ecy = MAP_H - VIEW_H;
+}
+
+static void enterEditor(void) {
+    ecx = spawnTX - VIEW_W / 2;
+    ecy = spawnTY - VIEW_H / 2;
+    clampEditor();
+    painting = false;
+    editMsgTimer = 0;
+    state = S_EDIT;
+}
 
 static void activate(int i) {
     if (i == 0) {
-        startGame();
-        state = S_PLAY;
+        loadOrDefault();
+        fromEditor = false;
+        startPlay();
     } else if (i == 1) {
-        msgTimer = 150;
+        loadOrDefault();
+        enterEditor();
     } else if (i == 2) {
         running = false;
     }
 }
 
+/* ---------- Mise a jour ---------- */
+
 static void updateTitle(u32 kDown) {
     int i;
-
-    if (msgTimer > 0)
-        msgTimer--;
 
     if (kDown & KEY_DOWN) sel = (sel + 1) % 3;
     if (kDown & KEY_UP)   sel = (sel + 2) % 3;
@@ -293,13 +416,86 @@ static void updatePlay(u32 kDown, u32 kHeld) {
     updateCamera();
 
     if (kDown & KEY_SELECT)
-        state = S_TITLE;
+        leavePlay();
 
     if (kDown & KEY_TOUCH) {
         touchPosition t;
         hidTouchRead(&t);
         if (inRect(&playTitleButton, t.px, t.py))
-            state = S_TITLE;
+            leavePlay();
+    }
+}
+
+/* repetition automatique quand on garde la croix appuyee */
+static bool stepRepeat(u32 kDown, u32 kHeld, u32 key, int *cnt) {
+    if (kDown & key) {
+        *cnt = 0;
+        return true;
+    }
+    if (kHeld & key) {
+        (*cnt)++;
+        return (*cnt > 15) && (*cnt % 4 == 0);
+    }
+    *cnt = 0;
+    return false;
+}
+
+static void updateEdit(u32 kDown, u32 kHeld) {
+    static int rep[4] = { 0, 0, 0, 0 };
+    int mx = 0, my = 0;
+
+    if (editMsgTimer > 0)
+        editMsgTimer--;
+
+    /* choix de la tuile */
+    if (kDown & KEY_L) editTile = (editTile + T_COUNT - 1) % T_COUNT;
+    if (kDown & KEY_R) editTile = (editTile + 1) % T_COUNT;
+
+    /* defilement de la zone d'edition */
+    if (stepRepeat(kDown, kHeld, KEY_LEFT,  &rep[0])) mx = -1;
+    if (stepRepeat(kDown, kHeld, KEY_RIGHT, &rep[1])) mx =  1;
+    if (stepRepeat(kDown, kHeld, KEY_UP,    &rep[2])) my = -1;
+    if (stepRepeat(kDown, kHeld, KEY_DOWN,  &rep[3])) my =  1;
+    ecx += mx;
+    ecy += my;
+    clampEditor();
+
+    /* peinture au stylet (seulement si le contact a commence ici) */
+    if (kDown & KEY_TOUCH) painting = true;
+    if (!(kHeld & KEY_TOUCH)) painting = false;
+
+    if (painting) {
+        touchPosition t;
+        int tx, ty;
+
+        hidTouchRead(&t);
+        tx = ecx + t.px / TS;
+        ty = ecy + t.py / TS;
+
+        if (tx >= 0 && tx < MAP_W && ty >= 0 && ty < MAP_H) {
+            if (kHeld & KEY_Y) {
+                spawnTX = tx;
+                spawnTY = ty;
+            } else {
+                map[ty][tx] = (kHeld & KEY_B) ? (u8)T_GRASS : (u8)editTile;
+            }
+        }
+    }
+
+    if (kDown & KEY_X) {
+        editMsg = saveMap() ? "Carte sauvegardée !" : "Erreur de sauvegarde (carte SD ?)";
+        editMsgTimer = 120;
+    }
+
+    if (kDown & KEY_A) {
+        saveMap();
+        fromEditor = true;
+        startPlay();
+    }
+
+    if (kDown & KEY_SELECT) {
+        saveMap();
+        state = S_TITLE;
     }
 }
 
@@ -319,16 +515,12 @@ static void drawTitleTop(void) {
     drawTextCX("RPG 2DS", TOP_W / 2, 30, 1.6f, COL(255, 255, 255));
     drawTextCX("Petit RPG avec éditeur intégré", TOP_W / 2, 105, 0.6f,
                COL(200, 210, 255));
-    drawTextCX("Étape 1 : la base du jeu", TOP_W / 2, 130, 0.5f,
+    drawTextCX("Étape 2 : l'éditeur de cartes", TOP_W / 2, 130, 0.5f,
                COL(150, 160, 190));
 }
 
 static void drawTitleBottom(void) {
     int i;
-
-    if (msgTimer > 0)
-        drawTextCX("L'éditeur arrive à l'étape 2 !", BOT_W / 2, 10, 0.5f,
-                   COL(255, 220, 80));
 
     for (i = 0; i < 3; i++)
         drawButton(&titleButtons[i], i == sel);
@@ -337,7 +529,7 @@ static void drawTitleBottom(void) {
                COL(170, 170, 190));
 }
 
-/* ---------- Dessin : jeu ---------- */
+/* ---------- Dessin : tuiles ---------- */
 
 static void drawTileDetail(int t, int tx, int ty, float sx, float sy) {
     switch (t) {
@@ -365,6 +557,8 @@ static void drawTileDetail(int t, int tx, int ty, float sx, float sy) {
         break;
     }
 }
+
+/* ---------- Dessin : jeu ---------- */
 
 static void drawMapTop(void) {
     int tx0 = camX / TS;
@@ -448,7 +642,106 @@ static void drawPlayBottom(void) {
     drawText(buf, 10, 156, 0.5f, white);
     drawText("Croix / stick : se déplacer", 10, 172, 0.5f, gray);
     drawText("B : courir", 10, 188, 0.5f, gray);
-    drawText("SELECT : titre    START : quitter", 10, 204, 0.5f, gray);
+    drawText(fromEditor ? "SELECT : éditeur    START : quitter"
+                        : "SELECT : titre    START : quitter",
+             10, 204, 0.5f, gray);
+}
+
+/* ---------- Dessin : editeur ---------- */
+
+/* ecran du bas : la zone qu'on modifie au stylet */
+static void drawEditBottom(void) {
+    int x, y;
+    u32 grid = C2D_Color32(0, 0, 0, 60);
+
+    for (y = 0; y < VIEW_H; y++) {
+        for (x = 0; x < VIEW_W; x++) {
+            int tx = ecx + x, ty = ecy + y;
+            int t = map[ty][tx];
+            float sx = (float)(x * TS), sy = (float)(y * TS);
+            C2D_DrawRectSolid(sx, sy, 0.0f, TS, TS, TILES[t].color);
+            drawTileDetail(t, tx, ty, sx, sy);
+        }
+    }
+
+    /* grille */
+    for (x = 1; x < VIEW_W; x++)
+        C2D_DrawRectSolid((float)(x * TS), 0, 0.1f, 1, BOT_H, grid);
+    for (y = 1; y < VIEW_H; y++)
+        C2D_DrawRectSolid(0, (float)(y * TS), 0.1f, BOT_W, 1, grid);
+
+    /* point de depart */
+    if (spawnTX >= ecx && spawnTX < ecx + VIEW_W &&
+        spawnTY >= ecy && spawnTY < ecy + VIEW_H) {
+        float sx = (float)((spawnTX - ecx) * TS);
+        float sy = (float)((spawnTY - ecy) * TS);
+        C2D_DrawRectSolid(sx + 2, sy + 2, 0.2f, 12, 12, COL(20, 20, 60));
+        C2D_DrawRectSolid(sx + 4, sy + 4, 0.21f, 8, 8, COL(255, 220, 80));
+    }
+}
+
+/* ecran du haut : la carte entiere, la palette et l'aide */
+static void drawEditTop(void) {
+    const int OX = 10, OY = 10, OS = 5;   /* carte entiere : position et echelle */
+    const char *help[] = {
+        "Stylet : peindre",
+        "L / R : tuile",
+        "B + stylet : gomme",
+        "Y + stylet : départ",
+        "Croix : défiler",
+        "A : tester",
+        "X : sauver",
+        "SELECT : titre",
+        "START : quitter",
+    };
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    u32 yellow = COL(255, 220, 80);
+    int i, tx, ty;
+    float vx, vy, vw, vh;
+
+    /* carte entiere */
+    C2D_DrawRectSolid(OX - 2, OY - 2, 0.0f, MAP_W * OS + 4, MAP_H * OS + 4, white);
+    for (ty = 0; ty < MAP_H; ty++)
+        for (tx = 0; tx < MAP_W; tx++)
+            C2D_DrawRectSolid(OX + tx * OS, OY + ty * OS, 0.05f, OS, OS,
+                              TILES[map[ty][tx]].color);
+
+    /* zone affichee sur l'ecran du bas */
+    vx = (float)(OX + ecx * OS);
+    vy = (float)(OY + ecy * OS);
+    vw = (float)(VIEW_W * OS);
+    vh = (float)(VIEW_H * OS);
+    C2D_DrawRectSolid(vx, vy, 0.1f, vw, 2, yellow);
+    C2D_DrawRectSolid(vx, vy + vh - 2, 0.1f, vw, 2, yellow);
+    C2D_DrawRectSolid(vx, vy, 0.1f, 2, vh, yellow);
+    C2D_DrawRectSolid(vx + vw - 2, vy, 0.1f, 2, vh, yellow);
+
+    /* point de depart */
+    C2D_DrawRectSolid((float)(OX + spawnTX * OS - 1), (float)(OY + spawnTY * OS - 1),
+                      0.2f, OS + 2, OS + 2, COL(255, 255, 255));
+    C2D_DrawRectSolid((float)(OX + spawnTX * OS), (float)(OY + spawnTY * OS),
+                      0.21f, OS, OS, COL(220, 60, 60));
+
+    /* aide */
+    for (i = 0; i < 9; i++)
+        drawText(help[i], 268, 10.0f + i * 14, 0.4f, gray);
+
+    /* palette */
+    for (i = 0; i < T_COUNT; i++) {
+        float bx = 10.0f + i * 36;
+        float by = 172.0f;
+        if (i == editTile)
+            C2D_DrawRectSolid(bx - 3, by - 3, 0.0f, 34, 34, yellow);
+        C2D_DrawRectSolid(bx, by, 0.02f, 28, 28, TILES[i].color);
+        drawTileDetail(i, 0, 0, bx + 6, by + 6);
+    }
+    drawText(TILES[editTile].name, 270, 172, 0.6f, white);
+    drawText(TILES[editTile].solid ? "Bloque le joueur" : "Traversable",
+             270, 196, 0.4f, gray);
+
+    if (editMsgTimer > 0)
+        drawText(editMsg, 10, 212, 0.5f, yellow);
 }
 
 /* ---------- Programme principal ---------- */
@@ -478,13 +771,18 @@ int main(int argc, char **argv) {
         kDown = hidKeysDown();
         kHeld = hidKeysHeld();
 
-        if (kDown & KEY_START)
+        if (kDown & KEY_START) {
+            if (state == S_EDIT)
+                saveMap();
             break;
+        }
 
         if (state == S_TITLE)
             updateTitle(kDown);
-        else
+        else if (state == S_PLAY)
             updatePlay(kDown, kHeld);
+        else
+            updateEdit(kDown, kHeld);
 
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C2D_TextBufClear(g_textBuf);
@@ -497,7 +795,7 @@ int main(int argc, char **argv) {
             C2D_TargetClear(bot, COL(30, 30, 40));
             C2D_SceneBegin(bot);
             drawTitleBottom();
-        } else {
+        } else if (state == S_PLAY) {
             C2D_TargetClear(top, COL(0, 0, 0));
             C2D_SceneBegin(top);
             drawMapTop();
@@ -506,6 +804,14 @@ int main(int argc, char **argv) {
             C2D_TargetClear(bot, COL(30, 30, 40));
             C2D_SceneBegin(bot);
             drawPlayBottom();
+        } else {
+            C2D_TargetClear(top, COL(18, 24, 48));
+            C2D_SceneBegin(top);
+            drawEditTop();
+
+            C2D_TargetClear(bot, COL(0, 0, 0));
+            C2D_SceneBegin(bot);
+            drawEditBottom();
         }
 
         C3D_FrameEnd(0);
