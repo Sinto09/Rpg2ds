@@ -12,6 +12,7 @@
 
 #include <3ds.h>
 #include <citro2d.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -534,6 +535,37 @@ typedef struct {
 static Player player;
 static int camX = 0, camY = 0;
 
+/* compteurs de test : FPS et vitesse reelle du joueur */
+static int dbgFps = 0;            /* images par seconde (derniere seconde) */
+static int dbgFrames = 0;         /* images comptees dans la seconde en cours */
+static float dbgDistWindow = 0;   /* pixels parcourus dans la seconde en cours */
+static float dbgSpeedPxS = 0;     /* vitesse moyenne sur la derniere seconde */
+static float dbgSpeedFrame = 0;   /* pixels parcourus pendant la derniere image */
+static u64 dbgLastTime = 0;
+
+static void dbgReset(void) {
+    dbgFrames = 0;
+    dbgDistWindow = 0;
+    dbgSpeedPxS = 0;
+    dbgSpeedFrame = 0;
+    dbgLastTime = osGetTime();
+}
+
+/* a appeler une fois par image */
+static void dbgTick(void) {
+    u64 now = osGetTime();
+
+    dbgFrames++;
+    if (now - dbgLastTime >= 1000) {
+        float secs = (float)(now - dbgLastTime) / 1000.0f;
+        dbgFps = (int)((float)dbgFrames / secs + 0.5f);
+        dbgSpeedPxS = dbgDistWindow / secs;
+        dbgFrames = 0;
+        dbgDistWindow = 0;
+        dbgLastTime = now;
+    }
+}
+
 static bool solidAt(int px, int py) {
     int tx, ty;
     if (px < 0 || py < 0)
@@ -670,6 +702,7 @@ static void drawButton(const Button *b, bool selected) {
 static void startPlay(void) {
     placePlayerAtTile(spawnTX, spawnTY);
     player.dir = 0;
+    dbgReset();
     playTitleButton.label = fromEditor ? "Éditeur" : "Titre";
     updateCamera();
     state = S_PLAY;
@@ -750,14 +783,17 @@ static void updateTitle(u32 kDown) {
 static void updatePlay(u32 kDown, u32 kHeld) {
     int speed = (kHeld & KEY_B) ? 3 : 2;
     int dx = 0, dy = 0, i;
+    int ox = player.x, oy = player.y;
+    float mx, my;
     circlePosition cp;
 
     hidCircleRead(&cp);
 
-    if ((kHeld & KEY_DLEFT)  || cp.dx < -40) dx = -1;
-    if ((kHeld & KEY_DRIGHT) || cp.dx >  40) dx =  1;
-    if ((kHeld & KEY_DUP)    || cp.dy >  40) dy = -1;
-    if ((kHeld & KEY_DDOWN)  || cp.dy < -40) dy =  1;
+    /* le jeu se joue uniquement au stick (la croix est reservee pour plus tard) */
+    if (cp.dx < -40) dx = -1;
+    if (cp.dx >  40) dx =  1;
+    if (cp.dy >  40) dy = -1;
+    if (cp.dy < -40) dy =  1;
 
     if (dx != 0) player.dir = (dx < 0) ? 2 : 3;
     if (dy != 0) player.dir = (dy < 0) ? 1 : 0;
@@ -767,6 +803,12 @@ static void updatePlay(u32 kDown, u32 kHeld) {
         if (dx != 0 && !blocked(player.x + dx, player.y)) player.x += dx;
         if (dy != 0 && !blocked(player.x, player.y + dy)) player.y += dy;
     }
+
+    /* distance reellement parcourue (0 si on pousse contre un mur) */
+    mx = (float)(player.x - ox);
+    my = (float)(player.y - oy);
+    dbgSpeedFrame = sqrtf(mx * mx + my * my);
+    dbgDistWindow += dbgSpeedFrame;
 
     updateCamera();
 
@@ -1072,6 +1114,23 @@ static void drawPlayerTop(void) {
     C2D_DrawRectSolid(ix, iy, 0.22f, 3, 3, COL(255, 255, 255));
 }
 
+/* petit cadre en haut a gauche : FPS et vitesse */
+static void drawDebugOverlay(void) {
+    char buf[48];
+    int sf10 = (int)(dbgSpeedFrame * 10.0f + 0.5f);
+
+    C2D_DrawRectSolid(4, 4, 0.4f, 128, 42, C2D_Color32(0, 0, 0, 150));
+
+    snprintf(buf, sizeof buf, "FPS : %d", dbgFps);
+    drawText(buf, 8, 6, 0.45f, COL(255, 255, 255));
+
+    snprintf(buf, sizeof buf, "Vitesse : %d px/s", (int)(dbgSpeedPxS + 0.5f));
+    drawText(buf, 8, 20, 0.45f, COL(255, 220, 80));
+
+    snprintf(buf, sizeof buf, "          %d.%d px/image", sf10 / 10, sf10 % 10);
+    drawText(buf, 8, 32, 0.4f, COL(170, 170, 190));
+}
+
 static void drawPlayBottom(void) {
     const int MX = 10, MY = 10, MS = 4; /* mini-carte : position et echelle */
     int tx, ty;
@@ -1112,7 +1171,7 @@ static void drawPlayBottom(void) {
     drawText(buf, 10, 140, 0.5f, white);
     snprintf(buf, sizeof buf, "Sur : %s", TILES[map[cy][cx]].name);
     drawText(buf, 10, 156, 0.5f, white);
-    drawText("Croix / stick : se déplacer", 10, 172, 0.5f, gray);
+    drawText("Stick : se déplacer", 10, 172, 0.5f, gray);
     drawText("B : courir", 10, 188, 0.5f, gray);
     drawText(fromEditor ? "SELECT : éditeur    START : quitter"
                         : "SELECT : titre    START : quitter",
@@ -1396,6 +1455,8 @@ int main(int argc, char **argv) {
     while (running && aptMainLoop()) {
         u32 kDown, kHeld;
 
+        dbgTick();
+
         hidScanInput();
         kDown = hidKeysDown();
         kHeld = hidKeysHeld();
@@ -1433,6 +1494,7 @@ int main(int argc, char **argv) {
             C2D_SceneBegin(top);
             drawMapTop();
             drawPlayerTop();
+            drawDebugOverlay();
 
             C2D_TargetClear(bot, COL(30, 30, 40));
             C2D_SceneBegin(bot);
