@@ -3,7 +3,7 @@ name: Compiler le jeu 3DS
 on:
   push:
   workflow_dispatch:
-
+  
 jobs:
   build:
     runs-on: ubuntu-latest
