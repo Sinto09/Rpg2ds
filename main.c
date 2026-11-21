@@ -1,10 +1,11 @@
 /*
- * RPG 2DS - Etape 2 : l'editeur de cartes
+ * RPG 2DS - Etape 3 : l'editeur de monstres
  *
- *  - Ecran titre : Jouer / Editeur / Quitter
+ *  - Ecran titre : Jouer / Editeur de cartes / Editeur de monstres / Quitter
  *  - Jeu : carte vue de dessus, deplacement (croix/stick, B = courir)
  *  - Editeur : ecran du bas = zone de dessin (stylet), ecran du haut = carte entiere
  *  - La carte est sauvegardee sur la carte SD : sdmc:/3ds/rpg2ds/map1.bin
+ *  - Les monstres sont sauvegardes dans :       sdmc:/3ds/rpg2ds/monsters.bin
  *
  * Compilation : devkitARM + libctru + citro2d (voir Makefile)
  */
@@ -38,6 +39,13 @@
 #define SAVE_DIR    "sdmc:/3ds/rpg2ds"
 #define SAVE_FILE   "sdmc:/3ds/rpg2ds/map1.bin"
 #define HEADER_SIZE 9
+
+#define MON_FILE     "sdmc:/3ds/rpg2ds/monsters.bin"
+#define MAX_MONSTERS 32
+#define NAME_BYTES   64   /* place reservee pour le nom (UTF-8) */
+#define NAME_CHARS   15   /* nombre maximum de lettres dans un nom */
+#define MON_REC      (NAME_BYTES + 10)
+#define MON_HEADER   6
 
 /* ---------- Tuiles ---------- */
 
@@ -183,6 +191,339 @@ static void loadOrDefault(void) {
         buildMap();
 }
 
+/* ---------- Monstres : donnees ---------- */
+
+#define N_COLORS 11
+#define N_SHAPES 6
+
+typedef struct {
+    char name[NAME_BYTES];
+    int hp, atk, def, spd;   /* PV : 1 a 999, le reste : 1 a 99 */
+    int color;               /* 0 .. N_COLORS-1 */
+    int shape;               /* 0 .. N_SHAPES-1 */
+} Monster;
+
+enum { F_NAME, F_HP, F_ATK, F_DEF, F_SPD, F_COLOR, F_SHAPE, F_COUNT };
+
+static Monster monsters[MAX_MONSTERS];
+static int monsterCount = 0;
+static int monSel = 0;          /* monstre affiche dans l'editeur */
+static int delTimer = 0;        /* > 0 : on attend la confirmation de suppression */
+static int monHeldBtn = -1;     /* bouton garde appuye (repetition) */
+static int monHeldFrames = 0;
+
+static const char *const COLOR_NAMES[N_COLORS] = {
+    "Rouge", "Orange", "Jaune", "Vert", "Turquoise", "Bleu",
+    "Violet", "Rose", "Gris", "Marron", "Blanc"
+};
+
+static const u8 COLOR_RGB[N_COLORS][3] = {
+    { 220, 60, 60 }, { 240, 140, 40 }, { 240, 210, 60 }, { 80, 190, 80 },
+    { 60, 190, 190 }, { 60, 100, 220 }, { 150, 80, 200 }, { 240, 130, 190 },
+    { 150, 150, 160 }, { 140, 90, 50 }, { 235, 235, 240 }
+};
+
+static const char *const SHAPE_NAMES[N_SHAPES] = {
+    "Gelée", "Chauve-souris", "Fantôme", "Crâne", "Araignée", "Golem"
+};
+
+/* dessins 16x16 : # corps, d corps fonce, w blanc, k noir, . vide */
+static const char *const SHAPES[N_SHAPES][16] = {
+    { /* Gelee */
+        "................",
+        "................",
+        "................",
+        "................",
+        "......dddd......",
+        "....dd####dd....",
+        "...d########d...",
+        "..d##########d..",
+        "..d##ww##ww##d..",
+        ".d###wk##wk###d.",
+        ".d############d.",
+        ".d####dddd####d.",
+        ".d############d.",
+        "..dd########dd..",
+        "...dddddddddd...",
+        "................",
+    },
+    { /* Chauve-souris */
+        "................",
+        "................",
+        ".....d....d.....",
+        ".....dd..dd.....",
+        ".....dddddd.....",
+        "d...d#w##w#d...d",
+        "dd..d######d..dd",
+        "ddd.d##dd##d.ddd",
+        "dddddd####dddddd",
+        ".ddddd#dd#ddddd.",
+        "..dddd.dd.dddd..",
+        "...ddd.dd.ddd...",
+        "....dd....dd....",
+        "................",
+        "................",
+        "................",
+    },
+    { /* Fantome */
+        "................",
+        "................",
+        ".....dddddd.....",
+        "....d######d....",
+        "...d########d...",
+        "..d##########d..",
+        "..d##ww##ww##d..",
+        "..d##wk##wk##d..",
+        "..d##########d..",
+        "..d####dd####d..",
+        "..d##########d..",
+        "..d##########d..",
+        "..d#d##dd##d#d..",
+        "..dd.dd..dd.dd..",
+        "................",
+        "................",
+    },
+    { /* Crane */
+        "................",
+        "................",
+        "....dddddddd....",
+        "...d########d...",
+        "..d##########d..",
+        "..d##########d..",
+        "..d#kkk##kkk#d..",
+        "..d#kkk##kkk#d..",
+        "..d####kk####d..",
+        "...d########d...",
+        "....dwdwddwdwd..",
+        "....dddddddddd..",
+        "................",
+        "................",
+        "................",
+        "................",
+    },
+    { /* Araignee */
+        "................",
+        "................",
+        "................",
+        "....d......d....",
+        "...d........d...",
+        "..d...####...d..",
+        ".d...######...d.",
+        "d...##wkkw##...d",
+        ".d..########..d.",
+        "..d..######..d..",
+        "...d..####..d...",
+        "....d..dd..d....",
+        "................",
+        "................",
+        "................",
+        "................",
+    },
+    { /* Golem */
+        "................",
+        "................",
+        "....dddddddd....",
+        "....d######d....",
+        "....d#w##w#d....",
+        "....d######d....",
+        "....dddddddd....",
+        "..dddd####dddd..",
+        ".d#dd######dd#d.",
+        ".d#d########d#d.",
+        ".ddd########ddd.",
+        "....dd####dd....",
+        "...ddd....ddd...",
+        "...ddd....ddd...",
+        "...dddd..dddd...",
+        "................",
+    },
+};
+
+static int clampInt(int v, int lo, int hi) {
+    return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+
+static void setMonster(Monster *m, const char *name, int hp, int atk, int def,
+                       int spd, int color, int shape) {
+    memset(m, 0, sizeof *m);
+    snprintf(m->name, NAME_BYTES, "%s", name);
+    m->hp = clampInt(hp, 1, 999);
+    m->atk = clampInt(atk, 1, 99);
+    m->def = clampInt(def, 1, 99);
+    m->spd = clampInt(spd, 1, 99);
+    m->color = clampInt(color, 0, N_COLORS - 1);
+    m->shape = clampInt(shape, 0, N_SHAPES - 1);
+}
+
+static void defaultMonsters(void) {
+    setMonster(&monsters[0], "Gelée", 20, 5, 2, 3, 3, 0);
+    setMonster(&monsters[1], "Chauve-souris", 14, 6, 1, 9, 6, 1);
+    setMonster(&monsters[2], "Crâne", 28, 9, 4, 4, 10, 3);
+    monsterCount = 3;
+    monSel = 0;
+}
+
+static bool monsterNew(void) {
+    char name[NAME_BYTES];
+
+    if (monsterCount >= MAX_MONSTERS)
+        return false;
+    snprintf(name, sizeof name, "Monstre %d", monsterCount + 1);
+    setMonster(&monsters[monsterCount], name, 30, 8, 4, 5, 0, 0);
+    monSel = monsterCount;
+    monsterCount++;
+    return true;
+}
+
+/* supprime le monstre choisi (on en garde toujours au moins un) */
+static bool monsterDelete(void) {
+    int i;
+
+    if (monsterCount <= 1)
+        return false;
+    for (i = monSel; i < monsterCount - 1; i++)
+        monsters[i] = monsters[i + 1];
+    monsterCount--;
+    if (monSel >= monsterCount)
+        monSel = monsterCount - 1;
+    return true;
+}
+
+static void adjustField(Monster *m, int field, int dir, int step) {
+    switch (field) {
+    case F_HP:    m->hp  = clampInt(m->hp  + dir * step, 1, 999); break;
+    case F_ATK:   m->atk = clampInt(m->atk + dir * step, 1, 99);  break;
+    case F_DEF:   m->def = clampInt(m->def + dir * step, 1, 99);  break;
+    case F_SPD:   m->spd = clampInt(m->spd + dir * step, 1, 99);  break;
+    case F_COLOR: m->color = (m->color + N_COLORS + dir) % N_COLORS; break;
+    case F_SHAPE: m->shape = (m->shape + N_SHAPES + dir) % N_SHAPES; break;
+    default: break;
+    }
+}
+
+static void fieldText(const Monster *m, int field, char *buf, size_t n) {
+    switch (field) {
+    case F_HP:    snprintf(buf, n, "%d", m->hp); break;
+    case F_ATK:   snprintf(buf, n, "%d", m->atk); break;
+    case F_DEF:   snprintf(buf, n, "%d", m->def); break;
+    case F_SPD:   snprintf(buf, n, "%d", m->spd); break;
+    case F_COLOR: snprintf(buf, n, "%s", COLOR_NAMES[m->color]); break;
+    case F_SHAPE: snprintf(buf, n, "%s", SHAPE_NAMES[m->shape]); break;
+    default:      buf[0] = '\0'; break;
+    }
+}
+
+/* clavier de la console pour choisir un nom */
+static bool askName(char *name, size_t cap) {
+    SwkbdState swkbd;
+    SwkbdButton button;
+    char buf[NAME_BYTES];
+
+    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, NAME_CHARS);
+    swkbdSetInitialText(&swkbd, name);
+    swkbdSetHintText(&swkbd, "Nom du monstre");
+    swkbdSetButton(&swkbd, SWKBD_BUTTON_LEFT, "Annuler", false);
+    swkbdSetButton(&swkbd, SWKBD_BUTTON_RIGHT, "OK", true);
+    swkbdSetValidation(&swkbd, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+
+    button = swkbdInputText(&swkbd, buf, sizeof buf);
+    if (button != SWKBD_BUTTON_RIGHT)
+        return false;
+    snprintf(name, cap, "%s", buf);
+    return true;
+}
+
+/* ---------- Monstres : sauvegarde / chargement ---------- */
+
+static void packMonster(const Monster *m, u8 *rec) {
+    memset(rec, 0, MON_REC);
+    strncpy((char *)rec, m->name, NAME_BYTES - 1);
+    rec[NAME_BYTES + 0] = (u8)(m->hp & 0xFF);
+    rec[NAME_BYTES + 1] = (u8)(m->hp >> 8);
+    rec[NAME_BYTES + 2] = (u8)(m->atk & 0xFF);
+    rec[NAME_BYTES + 3] = (u8)(m->atk >> 8);
+    rec[NAME_BYTES + 4] = (u8)(m->def & 0xFF);
+    rec[NAME_BYTES + 5] = (u8)(m->def >> 8);
+    rec[NAME_BYTES + 6] = (u8)(m->spd & 0xFF);
+    rec[NAME_BYTES + 7] = (u8)(m->spd >> 8);
+    rec[NAME_BYTES + 8] = (u8)m->color;
+    rec[NAME_BYTES + 9] = (u8)m->shape;
+}
+
+static void unpackMonster(Monster *m, const u8 *rec) {
+    memset(m, 0, sizeof *m);
+    memcpy(m->name, rec, NAME_BYTES);
+    m->name[NAME_BYTES - 1] = '\0';
+    if (m->name[0] == '\0')
+        snprintf(m->name, NAME_BYTES, "Monstre");
+    m->hp  = clampInt(rec[NAME_BYTES + 0] | (rec[NAME_BYTES + 1] << 8), 1, 999);
+    m->atk = clampInt(rec[NAME_BYTES + 2] | (rec[NAME_BYTES + 3] << 8), 1, 99);
+    m->def = clampInt(rec[NAME_BYTES + 4] | (rec[NAME_BYTES + 5] << 8), 1, 99);
+    m->spd = clampInt(rec[NAME_BYTES + 6] | (rec[NAME_BYTES + 7] << 8), 1, 99);
+    m->color = rec[NAME_BYTES + 8] % N_COLORS;
+    m->shape = rec[NAME_BYTES + 9] % N_SHAPES;
+}
+
+static bool saveMonsters(void) {
+    u8 header[MON_HEADER] = { 'R', 'P', 'G', 'M', 1, 0 };
+    u8 rec[MON_REC];
+    FILE *f;
+    bool ok;
+    int i;
+
+    header[5] = (u8)monsterCount;
+
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(SAVE_DIR, 0777);
+
+    f = fopen(MON_FILE, "wb");
+    if (f == NULL)
+        return false;
+
+    ok = (fwrite(header, 1, MON_HEADER, f) == MON_HEADER);
+    for (i = 0; ok && i < monsterCount; i++) {
+        packMonster(&monsters[i], rec);
+        ok = (fwrite(rec, 1, MON_REC, f) == MON_REC);
+    }
+    fclose(f);
+    return ok;
+}
+
+static bool loadMonsters(void) {
+    static Monster tmp[MAX_MONSTERS];
+    u8 header[MON_HEADER];
+    u8 rec[MON_REC];
+    FILE *f;
+    int i, count;
+
+    f = fopen(MON_FILE, "rb");
+    if (f == NULL)
+        return false;
+
+    if (fread(header, 1, MON_HEADER, f) != MON_HEADER ||
+        memcmp(header, "RPGM", 4) != 0 || header[4] != 1 ||
+        header[5] < 1 || header[5] > MAX_MONSTERS) {
+        fclose(f);
+        return false;
+    }
+
+    count = header[5];
+    for (i = 0; i < count; i++) {
+        if (fread(rec, 1, MON_REC, f) != MON_REC) {
+            fclose(f);
+            return false;
+        }
+        unpackMonster(&tmp[i], rec);
+    }
+    fclose(f);
+
+    memcpy(monsters, tmp, sizeof(Monster) * (size_t)count);
+    monsterCount = count;
+    if (monSel >= monsterCount)
+        monSel = 0;
+    return true;
+}
+
 /* ---------- Joueur et camera ---------- */
 
 typedef struct {
@@ -246,7 +587,7 @@ static void placePlayerAtTile(int tx, int ty) {
 
 /* ---------- Etat global ---------- */
 
-enum { S_TITLE, S_PLAY, S_EDIT };
+enum { S_TITLE, S_PLAY, S_EDIT, S_MONSTERS };
 
 static int state = S_TITLE;
 static bool running = true;
@@ -268,10 +609,13 @@ typedef struct {
     bool enabled;
 } Button;
 
-static Button titleButtons[3] = {
-    { 50,  40, 220, 44, "Jouer",   true },
-    { 50,  95, 220, 44, "Éditeur", true },
-    { 50, 150, 220, 44, "Quitter", true },
+#define N_TITLE_BUTTONS 4
+
+static Button titleButtons[N_TITLE_BUTTONS] = {
+    { 50,  12, 220, 40, "Jouer",               true },
+    { 50,  60, 220, 40, "Éditeur de cartes",   true },
+    { 50, 108, 220, 40, "Éditeur de monstres", true },
+    { 50, 156, 220, 40, "Quitter",             true },
 };
 
 static Button playTitleButton = { 222, 10, 88, 40, "Titre", true };
@@ -357,6 +701,15 @@ static void enterEditor(void) {
     state = S_EDIT;
 }
 
+static void enterMonsters(void) {
+    if (monSel >= monsterCount)
+        monSel = 0;
+    delTimer = 0;
+    monHeldBtn = -1;
+    monHeldFrames = 0;
+    state = S_MONSTERS;
+}
+
 static void activate(int i) {
     if (i == 0) {
         loadOrDefault();
@@ -366,6 +719,8 @@ static void activate(int i) {
         loadOrDefault();
         enterEditor();
     } else if (i == 2) {
+        enterMonsters();
+    } else if (i == 3) {
         running = false;
     }
 }
@@ -375,14 +730,14 @@ static void activate(int i) {
 static void updateTitle(u32 kDown) {
     int i;
 
-    if (kDown & KEY_DOWN) sel = (sel + 1) % 3;
-    if (kDown & KEY_UP)   sel = (sel + 2) % 3;
+    if (kDown & KEY_DOWN) sel = (sel + 1) % N_TITLE_BUTTONS;
+    if (kDown & KEY_UP)   sel = (sel + N_TITLE_BUTTONS - 1) % N_TITLE_BUTTONS;
     if (kDown & KEY_A)    activate(sel);
 
     if (kDown & KEY_TOUCH) {
         touchPosition t;
         hidTouchRead(&t);
-        for (i = 0; i < 3; i++) {
+        for (i = 0; i < N_TITLE_BUTTONS; i++) {
             if (inRect(&titleButtons[i], t.px, t.py)) {
                 sel = i;
                 activate(i);
@@ -499,6 +854,123 @@ static void updateEdit(u32 kDown, u32 kHeld) {
     }
 }
 
+/* ---------- Mise a jour : editeur de monstres ---------- */
+
+static Button monPrev = {   6,   4,  60, 26, "<",       true };
+static Button monNext = { 254,   4,  60, 26, ">",       true };
+static Button monName = {  70,  36, 244, 22, "",        true };
+static Button monNew  = {   6, 208,  96, 28, "Nouveau", true };
+static Button monDel  = { 108, 208,  96, 28, "Suppr.",  true };
+static Button monBack = { 210, 208, 104, 28, "Retour",  true };
+
+#define MON_ROW_Y(r) (36.0f + (r) * 24.0f)
+
+static Button rowButton(int r, bool plus) {
+    Button b = { plus ? 264.0f : 212.0f, MON_ROW_Y(r), plus ? 50.0f : 46.0f,
+                 22.0f, plus ? "+" : "-", true };
+    return b;
+}
+
+/* renvoie le numero du bouton touche (ou -1) :
+ * 0 <  1 >  2 Nouveau  3 Suppr.  4 Retour  5 Nom  12..23 les boutons - et + */
+static int hitTestMon(int px, int py) {
+    int r;
+
+    if (inRect(&monPrev, px, py)) return 0;
+    if (inRect(&monNext, px, py)) return 1;
+    if (inRect(&monNew,  px, py)) return 2;
+    if (inRect(&monDel,  px, py)) return 3;
+    if (inRect(&monBack, px, py)) return 4;
+    if (inRect(&monName, px, py)) return 5;
+    for (r = F_HP; r < F_COUNT; r++) {
+        Button minus = rowButton(r, false);
+        Button plus = rowButton(r, true);
+        if (inRect(&minus, px, py)) return 10 + r * 2;
+        if (inRect(&plus, px, py))  return 11 + r * 2;
+    }
+    return -1;
+}
+
+static void pressMon(int id, int step) {
+    Monster *m = &monsters[monSel];
+
+    if (id != 3)
+        delTimer = 0;
+
+    switch (id) {
+    case 0:
+        monSel = (monSel + monsterCount - 1) % monsterCount;
+        break;
+    case 1:
+        monSel = (monSel + 1) % monsterCount;
+        break;
+    case 2:
+        monsterNew();
+        break;
+    case 3:
+        if (monsterCount > 1) {
+            if (delTimer > 0) {
+                monsterDelete();
+                delTimer = 0;
+            } else {
+                delTimer = 120;   /* il faut retoucher le bouton pour confirmer */
+            }
+        }
+        break;
+    case 4:
+        saveMonsters();
+        state = S_TITLE;
+        break;
+    case 5:
+        askName(m->name, NAME_BYTES);
+        break;
+    default:
+        if (id >= 12 && id <= 23)
+            adjustField(m, (id - 10) / 2, (((id - 10) % 2) != 0) ? 1 : -1, step);
+        break;
+    }
+}
+
+static void updateMonsters(u32 kDown, u32 kHeld) {
+    touchPosition t;
+
+    if (delTimer > 0)
+        delTimer--;
+
+    if (kDown & KEY_L) pressMon(0, 1);
+    if (kDown & KEY_R) pressMon(1, 1);
+
+    if (kDown & KEY_SELECT) {
+        saveMonsters();
+        state = S_TITLE;
+        return;
+    }
+
+    if (kDown & KEY_TOUCH) {
+        hidTouchRead(&t);
+        monHeldBtn = hitTestMon(t.px, t.py);
+        monHeldFrames = 0;
+        if (monHeldBtn >= 0) {
+            pressMon(monHeldBtn, 1);
+            if (monHeldBtn < 12)   /* seuls les + et - se repetent */
+                monHeldBtn = -1;
+        }
+    } else if ((kHeld & KEY_TOUCH) && monHeldBtn >= 12 && monHeldBtn <= 19) {
+        /* PV et stats : on garde le stylet appuye, ca accelere */
+        hidTouchRead(&t);
+        if (hitTestMon(t.px, t.py) != monHeldBtn) {
+            monHeldBtn = -1;
+        } else {
+            monHeldFrames++;
+            if (monHeldFrames > 20 && monHeldFrames % 3 == 0)
+                pressMon(monHeldBtn,
+                         monHeldFrames > 120 ? 10 : (monHeldFrames > 60 ? 5 : 1));
+        }
+    } else if (!(kHeld & KEY_TOUCH)) {
+        monHeldBtn = -1;
+    }
+}
+
 /* ---------- Dessin : ecran titre ---------- */
 
 static void drawTitleTop(void) {
@@ -515,14 +987,14 @@ static void drawTitleTop(void) {
     drawTextCX("RPG 2DS", TOP_W / 2, 30, 1.6f, COL(255, 255, 255));
     drawTextCX("Petit RPG avec éditeur intégré", TOP_W / 2, 105, 0.6f,
                COL(200, 210, 255));
-    drawTextCX("Étape 2 : l'éditeur de cartes", TOP_W / 2, 130, 0.5f,
+    drawTextCX("Étape 3 : l'éditeur de monstres", TOP_W / 2, 130, 0.5f,
                COL(150, 160, 190));
 }
 
 static void drawTitleBottom(void) {
     int i;
 
-    for (i = 0; i < 3; i++)
+    for (i = 0; i < N_TITLE_BUTTONS; i++)
         drawButton(&titleButtons[i], i == sel);
 
     drawTextCX("Croix + A, ou touche un bouton", BOT_W / 2, 208, 0.45f,
@@ -744,6 +1216,161 @@ static void drawEditTop(void) {
         drawText(editMsg, 10, 212, 0.5f, yellow);
 }
 
+/* ---------- Dessin : editeur de monstres ---------- */
+
+static u32 monColor(int colorIdx, bool dark) {
+    int r = COLOR_RGB[colorIdx][0];
+    int g = COLOR_RGB[colorIdx][1];
+    int b = COLOR_RGB[colorIdx][2];
+
+    if (dark) {
+        r = r * 55 / 100;
+        g = g * 55 / 100;
+        b = b * 55 / 100;
+    }
+    return COL(r, g, b);
+}
+
+/* dessine un monstre : px = taille d'un "pixel" du dessin (16 x 16) */
+static void drawMonsterArt(int shape, int colorIdx, float x, float y, float px) {
+    u32 body = monColor(colorIdx, false);
+    u32 dark = monColor(colorIdx, true);
+    int r, c, start;
+
+    for (r = 0; r < 16; r++) {
+        const char *row = SHAPES[shape][r];
+        c = 0;
+        while (c < 16) {
+            char ch = row[c];
+            u32 col;
+
+            start = c;
+            while (c < 16 && row[c] == ch)
+                c++;
+            if (ch == '.')
+                continue;
+
+            if (ch == '#')      col = body;
+            else if (ch == 'd') col = dark;
+            else if (ch == 'w') col = COL(255, 255, 255);
+            else                col = COL(10, 10, 20);
+            C2D_DrawRectSolid(x + start * px, y + r * px, 0.3f,
+                              (c - start) * px, px, col);
+        }
+    }
+}
+
+static void drawMonstersTop(void) {
+    const Monster *m = &monsters[monSel];
+    static const char *const labels[4] = { "PV", "Attaque", "Défense", "Vitesse" };
+    int vals[4];
+    const int caps[4] = { 200, 50, 50, 50 };
+    u32 barCols[4] = { COL(220, 70, 70), COL(240, 150, 50),
+                       COL(80, 160, 230), COL(100, 200, 110) };
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    u32 yellow = COL(255, 220, 80);
+    char buf[48];
+    int i;
+
+    vals[0] = m->hp;
+    vals[1] = m->atk;
+    vals[2] = m->def;
+    vals[3] = m->spd;
+
+    /* apercu */
+    C2D_DrawRectSolid(10, 10, 0.0f, 130, 130, COL(35, 45, 80));
+    drawMonsterArt(m->shape, m->color, 27, 27, 6);
+
+    /* nom, forme et couleur */
+    drawText(m->name, 152, 12, 0.8f, white);
+    snprintf(buf, sizeof buf, "%s - %s", SHAPE_NAMES[m->shape], COLOR_NAMES[m->color]);
+    drawText(buf, 152, 42, 0.45f, gray);
+
+    /* barres de stats */
+    for (i = 0; i < 4; i++) {
+        float y = 68.0f + i * 18;
+        int v = (vals[i] > caps[i]) ? caps[i] : vals[i];
+        float w = 150.0f * (float)v / (float)caps[i];
+
+        drawText(labels[i], 152, y - 2, 0.45f, white);
+        C2D_DrawRectSolid(212, y, 0.0f, 150, 12, COL(25, 30, 55));
+        C2D_DrawRectSolid(212, y, 0.05f, w, 12, barCols[i]);
+        snprintf(buf, sizeof buf, "%d", vals[i]);
+        drawText(buf, 368, y - 2, 0.45f, white);
+    }
+
+    /* tous les monstres */
+    drawText("Tes monstres", 10, 146, 0.45f, gray);
+    for (i = 0; i < monsterCount; i++) {
+        float x = 10.0f + (i % 16) * 23;
+        float y = 166.0f + (i / 16) * 26;
+        if (i == monSel)
+            C2D_DrawRectSolid(x - 2, y - 2, 0.0f, 20, 20, yellow);
+        drawMonsterArt(monsters[i].shape, monsters[i].color, x, y, 1);
+    }
+
+    drawText("L / R : monstre précédent / suivant", 10, 222, 0.4f, gray);
+}
+
+static void drawMonstersBottom(void) {
+    const Monster *m = &monsters[monSel];
+    static const char *const labels[F_COUNT] = {
+        "Nom", "PV", "Attaque", "Défense", "Vitesse", "Couleur", "Forme"
+    };
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    char buf[48];
+    Button b;
+    int r;
+
+    /* en-tete : choix du monstre */
+    drawButton(&monPrev, false);
+    drawButton(&monNext, false);
+    snprintf(buf, sizeof buf, "Monstre %d / %d", monSel + 1, monsterCount);
+    drawTextInRect(buf, 66, 4, 188, 26, 0.55f, white);
+
+    /* nom */
+    drawText(labels[F_NAME], 10, 39, 0.5f, gray);
+    b = monName;
+    b.label = m->name;
+    drawButton(&b, false);
+
+    /* PV, stats, couleur, forme */
+    for (r = F_HP; r < F_COUNT; r++) {
+        float y = MON_ROW_Y(r);
+
+        C2D_DrawRectSolid(6, y, 0.0f, 306, 22,
+                          (r % 2) ? COL(40, 40, 55) : COL(48, 48, 66));
+        drawText(labels[r], 10, y + 3, 0.5f, gray);
+
+        fieldText(m, r, buf, sizeof buf);
+        drawTextInRect(buf, 84, y, 124, 22, 0.5f, white);
+
+        if (r == F_COLOR) {
+            C2D_DrawRectSolid(186, y + 3, 0.1f, 16, 16, COL(255, 255, 255));
+            C2D_DrawRectSolid(187, y + 4, 0.12f, 14, 14, monColor(m->color, false));
+        }
+
+        b = rowButton(r, false);
+        drawButton(&b, false);
+        b = rowButton(r, true);
+        drawButton(&b, false);
+    }
+
+    /* boutons du bas */
+    b = monNew;
+    b.enabled = (monsterCount < MAX_MONSTERS);
+    drawButton(&b, false);
+
+    b = monDel;
+    b.enabled = (monsterCount > 1);
+    b.label = (delTimer > 0) ? "Sûr ?" : "Suppr.";
+    drawButton(&b, delTimer > 0);
+
+    drawButton(&monBack, false);
+}
+
 /* ---------- Programme principal ---------- */
 
 int main(int argc, char **argv) {
@@ -763,6 +1390,8 @@ int main(int argc, char **argv) {
 
     initTiles();
     buildMap();
+    if (!loadMonsters())
+        defaultMonsters();
 
     while (running && aptMainLoop()) {
         u32 kDown, kHeld;
@@ -774,6 +1403,8 @@ int main(int argc, char **argv) {
         if (kDown & KEY_START) {
             if (state == S_EDIT)
                 saveMap();
+            else if (state == S_MONSTERS)
+                saveMonsters();
             break;
         }
 
@@ -781,6 +1412,8 @@ int main(int argc, char **argv) {
             updateTitle(kDown);
         else if (state == S_PLAY)
             updatePlay(kDown, kHeld);
+        else if (state == S_MONSTERS)
+            updateMonsters(kDown, kHeld);
         else
             updateEdit(kDown, kHeld);
 
@@ -804,6 +1437,14 @@ int main(int argc, char **argv) {
             C2D_TargetClear(bot, COL(30, 30, 40));
             C2D_SceneBegin(bot);
             drawPlayBottom();
+        } else if (state == S_MONSTERS) {
+            C2D_TargetClear(top, COL(18, 24, 48));
+            C2D_SceneBegin(top);
+            drawMonstersTop();
+
+            C2D_TargetClear(bot, COL(30, 30, 40));
+            C2D_SceneBegin(bot);
+            drawMonstersBottom();
         } else {
             C2D_TargetClear(top, COL(18, 24, 48));
             C2D_SceneBegin(top);
