@@ -16,18 +16,33 @@ jobs:
       - name: Installer les bibliothèques 3DS
         run: dkp-pacman -Syu --noconfirm 3ds-dev || echo "Installation ignorée (déjà présent ?)"
 
-      - name: Compiler
+      - name: Compiler le .3dsx
         run: make
 
-      - name: Garder le fichier en artefact
+      - name: Fabriquer le .cia
+        run: |
+          wget -q https://github.com/diasurgical/bannertool/releases/download/1.2.0/bannertool.zip
+          unzip -j bannertool.zip "linux-x86_64/bannertool" -d /opt/devkitpro/tools/bin
+          wget -q https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18/makerom-v0.18-ubuntu_x86_64.zip
+          unzip makerom-v0.18-ubuntu_x86_64.zip makerom -d /opt/devkitpro/tools/bin
+          chmod a+x /opt/devkitpro/tools/bin/bannertool /opt/devkitpro/tools/bin/makerom
+          bannertool makebanner -i banner.png -a audio.wav -o banner.bnr
+          bannertool makesmdh -s "RPG 2DS" -l "Petit RPG avec éditeur intégré" -p "Moi" -i icon.png -f "nosavebackups,visible" -o icon.icn
+          makerom -f cia -o rpg2ds.cia -target t -exefslogo -elf rpg2ds.elf -rsf app.rsf -banner banner.bnr -icon icon.icn
+
+      - name: Garder les fichiers en artefact
         uses: actions/upload-artifact@v4
         with:
           name: rpg2ds
-          path: rpg2ds.3dsx
+          path: |
+            rpg2ds.3dsx
+            rpg2ds.cia
 
       - name: Publier dans Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Dernière version
-          files: rpg2ds.3dsx
+          files: |
+            rpg2ds.3dsx
+            rpg2ds.cia
