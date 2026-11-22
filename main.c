@@ -1,8 +1,10 @@
 /*
- * RPG 2DS - Etape 5 : combats, classes, attaques, niveaux
+ * RPG 2DS - Etape 6 : inventaire, armes et armures
  *
  *  - Ecran titre : Jouer / Editeurs / Quitter
- *  - Menu Editeurs : Carte, Monstres, Classes, Attaques, Heros
+ *  - Menu Editeurs : Carte, Blocs, Monstres, Classes, Attaques, Objets, Heros
+ *  - Editeur de blocs : cree des blocs et dessine leurs textures (16 x 16, 32 couleurs)
+ *  - En jeu : X (ou bouton Sac) ouvre l'inventaire ; les monstres laissent du butin
  *  - Dans les hautes herbes, des monstres sauvages apparaissent : contact = combat
  *  - Jeu : carte vue de dessus, deplacement (croix/stick, B = courir)
  *  - Editeur : ecran du bas = zone de dessin (stylet), ecran du haut = carte entiere
@@ -48,41 +50,416 @@
 #define NAME_BYTES   64   /* place reservee pour le nom (UTF-8) */
 #define NAME_CHARS   15   /* nombre maximum de lettres dans un nom */
 #define MON_REC1     (NAME_BYTES + 10)   /* ancien format (version 1) */
-#define MON_REC      (NAME_BYTES + 12)
+#define MON_REC2     (NAME_BYTES + 12)   /* version 2 */
+#define MON_REC      (NAME_BYTES + 14)
 #define MON_HEADER   6
 
 #define ATK_FILE     "sdmc:/3ds/rpg2ds/attacks.bin"
 #define CLS_FILE     "sdmc:/3ds/rpg2ds/classes.bin"
 #define HERO_FILE    "sdmc:/3ds/rpg2ds/hero.bin"
+#define ITM_FILE     "sdmc:/3ds/rpg2ds/items.bin"
+#define MAX_ITEMS    32
+#define ITM_REC      (NAME_BYTES + 10)
 #define MAX_ATTACKS  24
 #define MAX_CLASSES  12
 #define ATK_REC      (NAME_BYTES + 3)
 #define CLS_REC      (NAME_BYTES + 20)
 #define MAX_LEVEL    50
 
-/* ---------- Tuiles ---------- */
+/* ---------- Tuiles (blocs) ---------- */
 
+#define MAX_TILES    32
+#define TILE_NAME    32
+#define ATLAS_W      128
+#define ATLAS_H      128
+#define ATLAS_SLOTS  64
+#define TEST_SLOT    32
+#define TILES_FILE   "sdmc:/3ds/rpg2ds/tiles.bin"
+#define DISPLAY_FILE "sdmc:/3ds/rpg2ds/display.bin"
+
+/* palette fixe de 32 couleurs pour dessiner les textures */
+static const u8 PAL[32][3] = {
+    { 20, 20, 30 },    { 60, 60, 75 },    { 120, 120, 130 }, { 190, 190, 200 }, { 250, 250, 250 },
+    { 120, 30, 30 },   { 220, 60, 60 },   { 250, 140, 130 }, { 140, 70, 20 },   { 200, 120, 50 },
+    { 250, 170, 60 },  { 250, 220, 90 },  { 30, 100, 40 },   { 76, 160, 64 },   { 130, 210, 90 },
+    { 55, 130, 48 },   { 30, 60, 130 },   { 50, 110, 200 },  { 110, 170, 240 }, { 60, 190, 190 },
+    { 80, 30, 120 },   { 150, 80, 200 },  { 240, 130, 190 }, { 200, 170, 110 }, { 170, 130, 90 },
+    { 110, 70, 30 },   { 80, 45, 15 },    { 80, 80, 90 },    { 50, 150, 60 },   { 235, 235, 240 },
+    { 140, 90, 50 },   { 0, 0, 0 },
+};
+
+static u32 palCol(int i) {
+    return COL(PAL[i & 31][0], PAL[i & 31][1], PAL[i & 31][2]);
+}
+
+/* les blocs de depart (leurs numeros servent aussi a la carte par defaut) */
 enum { T_GRASS, T_WALL, T_WATER, T_TREE, T_PATH, T_FLOOR, T_DOOR, T_TALL, T_COUNT };
 
 typedef struct {
-    const char *name;
-    u32 color;
-    bool solid;
-} TileDef;
+    char name[TILE_NAME];
+    bool solid;       /* bloque le joueur */
+    bool tall;        /* hautes herbes : les monstres sauvages y apparaissent */
+    u32 color;        /* couleur moyenne (mini-cartes) */
+    u8 pix[16][16];   /* la texture : numeros de couleurs de la palette */
+} Tile;
 
-static TileDef TILES[T_COUNT];
+static Tile tiles[MAX_TILES];
+static int tileCount = 0;
+#define TILES tiles
+
 static u8 map[MAP_H][MAP_W];
 static int spawnTX = 12, spawnTY = 13;   /* point de depart (en tuiles) */
 
+static void tileFill(Tile *t, int c) {
+    memset(t->pix, c, sizeof t->pix);
+}
+
+static void tileRect(Tile *t, int x, int y, int w, int h, int c) {
+    int xx, yy;
+    for (yy = y; yy < y + h; yy++)
+        for (xx = x; xx < x + w; xx++)
+            if (xx >= 0 && xx < 16 && yy >= 0 && yy < 16)
+                t->pix[yy][xx] = (u8)c;
+}
+
+static void tileRecolor(Tile *t) {
+    int x, y, r = 0, g = 0, b = 0;
+
+    for (y = 0; y < 16; y++) {
+        for (x = 0; x < 16; x++) {
+            const u8 *p = PAL[t->pix[y][x] & 31];
+            r += p[0];
+            g += p[1];
+            b += p[2];
+        }
+    }
+    t->color = COL(r / 256, g / 256, b / 256);
+}
+
+static void tileSet(Tile *t, const char *name, bool solid, bool tall, int base) {
+    memset(t, 0, sizeof *t);
+    snprintf(t->name, TILE_NAME, "%s", name);
+    t->solid = solid;
+    t->tall = tall;
+    tileFill(t, base);
+}
+
 static void initTiles(void) {
-    TILES[T_GRASS] = (TileDef){ "Herbe",  COL(76, 160, 64),   false };
-    TILES[T_WALL]  = (TileDef){ "Mur",    COL(120, 120, 130), true };
-    TILES[T_WATER] = (TileDef){ "Eau",    COL(50, 110, 200),  true };
-    TILES[T_TREE]  = (TileDef){ "Arbre",  COL(30, 100, 40),   true };
-    TILES[T_PATH]  = (TileDef){ "Chemin", COL(200, 170, 110), false };
-    TILES[T_FLOOR] = (TileDef){ "Sol",    COL(170, 130, 90),  false };
-    TILES[T_DOOR]  = (TileDef){ "Porte",  COL(110, 70, 30),   false };
-    TILES[T_TALL]  = (TileDef){ "Hautes herbes", COL(52, 135, 52), false };
+    Tile *t;
+    int i;
+
+    t = &tiles[T_GRASS];
+    tileSet(t, "Herbe", false, false, 13);
+    tileRect(t, 3, 4, 2, 2, 15);
+    tileRect(t, 10, 9, 2, 2, 15);
+    tileRect(t, 6, 13, 3, 1, 15);
+    tileRect(t, 13, 3, 1, 1, 14);
+
+    t = &tiles[T_WALL];
+    tileSet(t, "Mur", true, false, 2);
+    tileRect(t, 0, 7, 16, 1, 27);
+    tileRect(t, 0, 15, 16, 1, 27);
+    tileRect(t, 8, 0, 1, 7, 27);
+    tileRect(t, 4, 8, 1, 7, 27);
+    tileRect(t, 12, 8, 1, 7, 27);
+
+    t = &tiles[T_WATER];
+    tileSet(t, "Eau", true, false, 17);
+    tileRect(t, 3, 6, 10, 2, 18);
+    tileRect(t, 1, 12, 5, 1, 18);
+    tileRect(t, 10, 3, 4, 1, 18);
+
+    t = &tiles[T_TREE];
+    tileSet(t, "Arbre", true, false, 12);
+    tileRect(t, 3, 2, 10, 8, 28);
+    tileRect(t, 6, 10, 4, 6, 25);
+
+    t = &tiles[T_PATH];
+    tileSet(t, "Chemin", false, false, 23);
+    tileRect(t, 2, 3, 2, 1, 24);
+    tileRect(t, 10, 11, 3, 1, 24);
+
+    t = &tiles[T_FLOOR];
+    tileSet(t, "Sol", false, false, 24);
+    tileRect(t, 0, 5, 16, 1, 25);
+    tileRect(t, 0, 11, 16, 1, 25);
+
+    t = &tiles[T_DOOR];
+    tileSet(t, "Porte", false, false, 25);
+    tileRect(t, 3, 0, 10, 16, 26);
+
+    t = &tiles[T_TALL];
+    tileSet(t, "Hautes herbes", false, true, 15);
+    tileRect(t, 2, 6, 2, 9, 14);
+    tileRect(t, 7, 2, 2, 12, 13);
+    tileRect(t, 12, 7, 2, 8, 14);
+    tileRect(t, 1, 14, 14, 2, 12);
+
+    tileCount = T_COUNT;
+    for (i = 0; i < tileCount; i++)
+        tileRecolor(&tiles[i]);
+}
+
+/* ---------- Textures : toutes les tuiles dans une seule image pour la console ---------- */
+
+/* reglages d'affichage (menu "Y" des editeurs) : au cas ou les textures sortiraient
+ * a l'envers ou avec de mauvaises couleurs */
+static int texFlipV = 0, texBswap = 0, texSwapXY = 0;
+
+static C3D_Tex atlasTex;
+static Tex3DS_SubTexture atlasSub[ATLAS_SLOTS];
+static bool atlasOK = false;
+static bool atlasDirty = false;
+static u8 testPix[16][16];
+
+/* position d'un point dans un carre de 8x8 (ordre en Z utilise par la console) */
+static u32 mortonIndex(u32 x, u32 y) {
+    u32 i = 0, b;
+
+    for (b = 0; b < 3; b++) {
+        i |= ((x >> b) & 1u) << (2 * b);
+        i |= ((y >> b) & 1u) << (2 * b + 1);
+    }
+    return i;
+}
+
+static u32 texelOf(int idx) {
+    u32 w = ((u32)PAL[idx & 31][0] << 24) | ((u32)PAL[idx & 31][1] << 16) |
+            ((u32)PAL[idx & 31][2] << 8) | 0xFFu;
+    return texBswap ? __builtin_bswap32(w) : w;
+}
+
+/* ecrit une texture 16x16 (256 numeros de couleurs) dans la case "slot" de l'image */
+static void atlasWriteSlot(int slot, const u8 *pix) {
+    u32 *data;
+    int px, py;
+
+    if (!atlasOK || slot < 0 || slot >= ATLAS_SLOTS)
+        return;
+    data = (u32 *)atlasTex.data;
+    for (py = 0; py < 16; py++) {
+        for (px = 0; px < 16; px++) {
+            u32 x = (u32)((slot % 8) * 16 + px);
+            u32 y = (u32)(ATLAS_H - 1 - ((slot / 8) * 16 + py));
+            u32 m = texSwapXY ? mortonIndex(y & 7u, x & 7u) : mortonIndex(x & 7u, y & 7u);
+            data[((y >> 3) * (ATLAS_W >> 3) + (x >> 3)) * 64u + m] = texelOf(pix[py * 16 + px]);
+        }
+    }
+}
+
+static void atlasFlush(void) {
+    if (atlasOK)
+        GSPGPU_FlushDataCache(atlasTex.data, ATLAS_W * ATLAS_H * 4);
+}
+
+static void atlasSetupSubtex(void) {
+    int i;
+
+    for (i = 0; i < ATLAS_SLOTS; i++) {
+        float x0 = (float)((i % 8) * 16);
+        float y0 = (float)((i / 8) * 16);
+        Tex3DS_SubTexture *s = &atlasSub[i];
+
+        s->width = 16;
+        s->height = 16;
+        s->left = x0 / ATLAS_W;
+        s->right = (x0 + 16.0f) / ATLAS_W;
+        if (!texFlipV) {
+            s->top = 1.0f - y0 / ATLAS_H;
+            s->bottom = 1.0f - (y0 + 16.0f) / ATLAS_H;
+        } else {
+            s->top = 1.0f - (y0 + 16.0f) / ATLAS_H;
+            s->bottom = 1.0f - y0 / ATLAS_H;
+        }
+    }
+}
+
+static void atlasRebuild(void) {
+    int i;
+
+    if (!atlasOK)
+        return;
+    atlasSetupSubtex();
+    for (i = 0; i < tileCount; i++)
+        atlasWriteSlot(i, &tiles[i].pix[0][0]);
+    atlasWriteSlot(TEST_SLOT, &testPix[0][0]);
+    atlasFlush();
+}
+
+static void atlasInit(void) {
+    int x, y;
+
+    /* motif de test : 4 carres de couleur, avec une barre noire a gauche de chacun */
+    for (y = 0; y < 16; y++) {
+        for (x = 0; x < 16; x++) {
+            int c = (y < 8) ? ((x < 8) ? 6 : 13) : ((x < 8) ? 17 : 11);
+            if ((x & 7) == 0)
+                c = 31;
+            testPix[y][x] = (u8)c;
+        }
+    }
+
+    atlasOK = C3D_TexInit(&atlasTex, ATLAS_W, ATLAS_H, GPU_RGBA8);
+    if (!atlasOK)
+        return;
+    memset(atlasTex.data, 0, ATLAS_W * ATLAS_H * 4);
+    C3D_TexSetFilter(&atlasTex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(&atlasTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    atlasRebuild();
+}
+
+/* dessine la case "slot" de l'image (scale = agrandissement) */
+static void drawSlot(int slot, float x, float y, float z, float scale) {
+    if (atlasOK) {
+        C2D_Image img;
+        img.tex = &atlasTex;
+        img.subtex = &atlasSub[slot];
+        C2D_DrawImageAt(img, x, y, z, NULL, scale, scale);
+    } else {
+        C2D_DrawRectSolid(x, y, z, TS * scale, TS * scale,
+                          (slot < tileCount) ? tiles[slot].color : COL(120, 120, 130));
+    }
+}
+
+static void drawTile(int idx, float x, float y, float z, float scale) {
+    if (idx < 0 || idx >= tileCount)
+        idx = 0;
+    drawSlot(idx, x, y, z, scale);
+}
+
+static void saveDisplay(void) {
+    u8 b[7] = { 'R', 'P', 'G', 'D', 0, 0, 0 };
+    FILE *f;
+
+    b[4] = (u8)texFlipV;
+    b[5] = (u8)texBswap;
+    b[6] = (u8)texSwapXY;
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(SAVE_DIR, 0777);
+    f = fopen(DISPLAY_FILE, "wb");
+    if (f != NULL) {
+        fwrite(b, 1, sizeof b, f);
+        fclose(f);
+    }
+}
+
+static void loadDisplay(void) {
+    u8 b[7];
+    FILE *f = fopen(DISPLAY_FILE, "rb");
+
+    if (f == NULL)
+        return;
+    if (fread(b, 1, sizeof b, f) == sizeof b && memcmp(b, "RPGD", 4) == 0) {
+        texFlipV = b[4] ? 1 : 0;
+        texBswap = b[5] ? 1 : 0;
+        texSwapXY = b[6] ? 1 : 0;
+    }
+    fclose(f);
+}
+
+/* ---------- Tuiles : sauvegarde, suppression ---------- */
+
+#define TILE_REC (TILE_NAME + 1 + 256)
+
+static bool saveTiles(void) {
+    u8 hdr[6] = { 'R', 'P', 'G', 'T', 1, 0 };
+    u8 rec[TILE_REC];
+    FILE *f;
+    bool ok;
+    int i;
+
+    hdr[5] = (u8)tileCount;
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(SAVE_DIR, 0777);
+    f = fopen(TILES_FILE, "wb");
+    if (f == NULL)
+        return false;
+
+    ok = (fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr);
+    for (i = 0; ok && i < tileCount; i++) {
+        memset(rec, 0, sizeof rec);
+        strncpy((char *)rec, tiles[i].name, TILE_NAME - 1);
+        rec[TILE_NAME] = (u8)((tiles[i].solid ? 1 : 0) | (tiles[i].tall ? 2 : 0));
+        memcpy(rec + TILE_NAME + 1, tiles[i].pix, 256);
+        ok = (fwrite(rec, 1, TILE_REC, f) == TILE_REC);
+    }
+    fclose(f);
+    return ok;
+}
+
+static bool loadTiles(void) {
+    static Tile tmp[MAX_TILES];
+    u8 hdr[6];
+    u8 rec[TILE_REC];
+    FILE *f;
+    int i, k, count;
+
+    f = fopen(TILES_FILE, "rb");
+    if (f == NULL)
+        return false;
+
+    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr || memcmp(hdr, "RPGT", 4) != 0 ||
+        hdr[4] != 1 || hdr[5] < 1 || hdr[5] > MAX_TILES) {
+        fclose(f);
+        return false;
+    }
+
+    count = hdr[5];
+    for (i = 0; i < count; i++) {
+        if (fread(rec, 1, TILE_REC, f) != TILE_REC) {
+            fclose(f);
+            return false;
+        }
+        memset(&tmp[i], 0, sizeof tmp[i]);
+        memcpy(tmp[i].name, rec, TILE_NAME);
+        tmp[i].name[TILE_NAME - 1] = '\0';
+        if (tmp[i].name[0] == '\0')
+            snprintf(tmp[i].name, TILE_NAME, "Bloc %d", i + 1);
+        tmp[i].solid = (rec[TILE_NAME] & 1) != 0;
+        tmp[i].tall = (rec[TILE_NAME] & 2) != 0;
+        for (k = 0; k < 256; k++)
+            ((u8 *)tmp[i].pix)[k] = rec[TILE_NAME + 1 + k] & 31;
+        tileRecolor(&tmp[i]);
+    }
+    fclose(f);
+
+    memcpy(tiles, tmp, sizeof(Tile) * (size_t)count);
+    tileCount = count;
+    return true;
+}
+
+/* aucune case de la carte ne doit pointer vers un bloc qui n'existe pas */
+static void mapClampTiles(void) {
+    int x, y;
+
+    for (y = 0; y < MAP_H; y++)
+        for (x = 0; x < MAP_W; x++)
+            if (map[y][x] >= tileCount)
+                map[y][x] = 0;
+}
+
+/* supprime un bloc : les cases de la carte qui l'utilisaient deviennent le bloc 1 */
+static bool tileDelete(int k) {
+    int i, x, y;
+
+    if (tileCount <= 1 || k < 0 || k >= tileCount)
+        return false;
+    for (i = k; i < tileCount - 1; i++)
+        tiles[i] = tiles[i + 1];
+    tileCount--;
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            int v = map[y][x];
+            if (v == k)
+                v = 0;
+            else if (v > k)
+                v--;
+            map[y][x] = (u8)v;
+        }
+    }
+    mapClampTiles();
+    return true;
 }
 
 /* ---------- Carte par defaut ---------- */
@@ -208,7 +585,7 @@ static bool loadMap(void) {
 
     for (y = 0; y < MAP_H; y++)
         for (x = 0; x < MAP_W; x++)
-            map[y][x] = (tmp[y][x] < T_COUNT) ? tmp[y][x] : T_GRASS;
+            map[y][x] = (tmp[y][x] < tileCount) ? tmp[y][x] : 0;
 
     spawnTX = (header[7] < MAP_W) ? header[7] : 1;
     spawnTY = (header[8] < MAP_H) ? header[8] : 1;
@@ -218,6 +595,7 @@ static bool loadMap(void) {
 static void loadOrDefault(void) {
     if (!loadMap())
         buildMap();
+    mapClampTiles();
 }
 
 /* ---------- Monstres : donnees ---------- */
@@ -227,7 +605,8 @@ static void loadOrDefault(void) {
 
 enum { ST_HP, ST_ATK, ST_DEF, ST_SPD, ST_COUNT };
 enum { K_DAMAGE, K_HEAL, K_COUNT };
-enum { FM_MONSTERS, FM_CLASSES, FM_ATTACKS, FM_HERO, FM_COUNT };
+enum { IK_WEAPON, IK_ARMOR, IK_POTION, IK_COUNT };
+enum { FM_MONSTERS, FM_CLASSES, FM_ATTACKS, FM_ITEMS, FM_HERO, FM_COUNT };
 
 /* une attaque : degats, ou soin (la puissance est alors un % des PV max) */
 typedef struct {
@@ -245,6 +624,14 @@ typedef struct {
     int atk[4];           /* numeros d'attaques */
 } Class;
 
+/* un objet : arme (+ATK...), armure (+DEF, +PV...) ou potion (rend des PV) */
+typedef struct {
+    char name[NAME_BYTES];
+    int kind;             /* IK_WEAPON, IK_ARMOR ou IK_POTION */
+    int bonus[ST_COUNT];  /* bonus de stats (potion : PV rendus) */
+    int req;              /* niveau requis pour l'equiper */
+} Item;
+
 typedef struct {
     char name[NAME_BYTES];
     int st[ST_COUNT];   /* stats de base (niveau 1) */
@@ -252,16 +639,22 @@ typedef struct {
     int shape;          /* 0 .. N_SHAPES-1 */
     int level;          /* niveau moyen quand on le rencontre */
     int cls;            /* sa classe : donne ses attaques et sa croissance */
+    int drop;           /* objet laisse a sa mort (-1 : aucun) */
+    int rate;           /* chance de laisser cet objet, en % */
 } Monster;
 
 typedef struct {
     int cls, level, xp, hp;
+    int weapon, armor;      /* objets equipes (-1 : rien) */
+    int inv[MAX_ITEMS];     /* nombre d'exemplaires possedes de chaque objet */
 } Hero;
 
 static Attack attacks[MAX_ATTACKS];
 static int attackCount = 0;
 static Class classes[MAX_CLASSES];
 static int classCount = 0;
+static Item items[MAX_ITEMS];
+static int itemCount = 0;
 static Monster monsters[MAX_MONSTERS];
 static int monsterCount = 0;
 static Hero hero;
@@ -444,6 +837,8 @@ static void setMonster(Monster *m, const char *name, int hp, int atk, int def,
     m->shape = clampInt(shape, 0, N_SHAPES - 1);
     m->level = clampInt(level, 1, MAX_LEVEL);
     m->cls = cls;
+    m->drop = -1;
+    m->rate = 0;
 }
 
 /* ----- calculs de stats ----- */
@@ -460,8 +855,31 @@ static int xpNeed(int level) {
     return 10 + level * level * 3;
 }
 
+static int itemMax(int s) { return (s == ST_HP) ? 300 : 50; }
+
+/* stats du heros, avec l'arme et l'armure donnees (-1 : rien) */
+static int heroStatEq(int s, int weapon, int armor) {
+    int v = classStat(&classes[hero.cls], s, hero.level);
+
+    if (weapon >= 0 && weapon < itemCount) v += items[weapon].bonus[s];
+    if (armor >= 0 && armor < itemCount)   v += items[armor].bonus[s];
+    return (v < 1) ? 1 : v;
+}
+
 static int heroStat(int s) {
-    return classStat(&classes[hero.cls], s, hero.level);
+    return heroStatEq(s, hero.weapon, hero.armor);
+}
+
+static void setItem(Item *it, const char *name, int kind, int hp, int atk, int def,
+                    int spd, int req) {
+    memset(it, 0, sizeof *it);
+    setName(it->name, name);
+    it->kind = clampInt(kind, 0, IK_COUNT - 1);
+    it->bonus[ST_HP] = clampInt(hp, 0, itemMax(ST_HP));
+    it->bonus[ST_ATK] = clampInt(atk, 0, itemMax(ST_ATK));
+    it->bonus[ST_DEF] = clampInt(def, 0, itemMax(ST_DEF));
+    it->bonus[ST_SPD] = clampInt(spd, 0, itemMax(ST_SPD));
+    it->req = clampInt(req, 1, MAX_LEVEL);
 }
 
 /* ----- valeurs par defaut ----- */
@@ -490,17 +908,49 @@ static void defaultClasses(void) {
     classCount = 4;
 }
 
+static void defaultItems(void) {
+    /*                          nom                  type       PV atk def vit niv */
+    setItem(&items[0], "Potion",              IK_POTION, 30,  0,  0,  0, 1);
+    setItem(&items[1], "Dague",               IK_WEAPON,  0,  3,  0,  1, 1);
+    setItem(&items[2], "Épée de fer",         IK_WEAPON,  0,  6,  0,  0, 3);
+    setItem(&items[3], "Hache de guerre",     IK_WEAPON,  0, 10,  0,  0, 8);
+    setItem(&items[4], "Rapière",             IK_WEAPON,  0,  5,  0,  3, 5);
+    setItem(&items[5], "Tunique",             IK_ARMOR,   5,  0,  2,  0, 1);
+    setItem(&items[6], "Cotte de mailles",    IK_ARMOR,  10,  0,  5,  0, 4);
+    setItem(&items[7], "Armure de plaques",   IK_ARMOR,  20,  0,  9,  0, 8);
+    setItem(&items[8], "Grande potion",       IK_POTION, 80,  0,  0,  0, 1);
+    itemCount = 9;
+}
+
 static void defaultMonsters(void) {
     setMonster(&monsters[0], "Gelée", 20, 5, 2, 3, 3, 0, 3, 3);
     setMonster(&monsters[1], "Chauve-souris", 14, 6, 1, 9, 6, 1, 4, 3);
     setMonster(&monsters[2], "Crâne", 28, 9, 4, 4, 10, 3, 6, 3);
+    monsters[0].drop = 0;  monsters[0].rate = 50;   /* Potion */
+    monsters[1].drop = 2;  monsters[1].rate = 20;   /* Epee de fer */
+    monsters[2].drop = 6;  monsters[2].rate = 20;   /* Cotte de mailles */
     monsterCount = 3;
+}
+
+/* equipement de depart : une dague, une tunique et 2 potions */
+static void startKit(void) {
+    memset(hero.inv, 0, sizeof hero.inv);
+    hero.weapon = -1;
+    hero.armor = -1;
+    if (itemCount > 5) {
+        hero.inv[0] = 2;
+        hero.inv[1] = 1;
+        hero.inv[5] = 1;
+        hero.weapon = 1;
+        hero.armor = 5;
+    }
 }
 
 static void defaultHero(void) {
     hero.cls = 0;
     hero.level = 1;
     hero.xp = 0;
+    startKit();
     hero.hp = heroStat(ST_HP);
 }
 
@@ -514,10 +964,22 @@ static void sanitizeAll(void) {
     for (i = 0; i < monsterCount; i++) {
         monsters[i].cls = clampInt(monsters[i].cls, 0, classCount - 1);
         monsters[i].level = clampInt(monsters[i].level, 1, MAX_LEVEL);
+        if (monsters[i].drop < -1 || monsters[i].drop >= itemCount)
+            monsters[i].drop = -1;
+        monsters[i].rate = clampInt(monsters[i].rate, 0, 100);
     }
     hero.cls = clampInt(hero.cls, 0, classCount - 1);
     hero.level = clampInt(hero.level, 1, MAX_LEVEL);
     hero.xp = clampInt(hero.xp, 0, 99999);
+    for (i = 0; i < MAX_ITEMS; i++)
+        hero.inv[i] = (i < itemCount) ? clampInt(hero.inv[i], 0, 99) : 0;
+    /* l'equipement doit etre du bon type et etre possede */
+    if (hero.weapon < 0 || hero.weapon >= itemCount || items[hero.weapon].kind != IK_WEAPON ||
+        hero.inv[hero.weapon] <= 0)
+        hero.weapon = -1;
+    if (hero.armor < 0 || hero.armor >= itemCount || items[hero.armor].kind != IK_ARMOR ||
+        hero.inv[hero.armor] <= 0)
+        hero.armor = -1;
     hero.hp = clampInt(hero.hp, 1, heroStat(ST_HP));
 }
 
@@ -611,6 +1073,43 @@ static bool attackDelete(void) {
     return true;
 }
 
+static bool itemNew(void) {
+    char name[NAME_BYTES];
+
+    if (itemCount >= MAX_ITEMS)
+        return false;
+    snprintf(name, sizeof name, "Objet %d", itemCount + 1);
+    setItem(&items[itemCount], name, IK_WEAPON, 0, 3, 0, 0, 1);
+    hero.inv[itemCount] = 0;
+    formIdx[FM_ITEMS] = itemCount;
+    itemCount++;
+    return true;
+}
+
+static bool itemDelete(void) {
+    int i, d = formIdx[FM_ITEMS];
+
+    if (itemCount <= 1)
+        return false;
+    for (i = d; i < itemCount - 1; i++) {
+        items[i] = items[i + 1];
+        hero.inv[i] = hero.inv[i + 1];
+    }
+    hero.inv[itemCount - 1] = 0;
+    itemCount--;
+    if (hero.weapon == d) hero.weapon = -1;
+    else if (hero.weapon > d) hero.weapon--;
+    if (hero.armor == d) hero.armor = -1;
+    else if (hero.armor > d) hero.armor--;
+    for (i = 0; i < monsterCount; i++) {
+        if (monsters[i].drop == d) monsters[i].drop = -1;
+        else if (monsters[i].drop > d) monsters[i].drop--;
+    }
+    formIdx[FM_ITEMS] = clampInt(d, 0, itemCount - 1);
+    sanitizeAll();
+    return true;
+}
+
 /* ----- modifier un champ ----- */
 
 static void adjustMonster(Monster *m, int f, int dir, int step) {
@@ -624,6 +1123,10 @@ static void adjustMonster(Monster *m, int f, int dir, int step) {
         m->level = clampInt(m->level + dir * step, 1, MAX_LEVEL);
     else if (f == 7)
         m->cls = (m->cls + classCount + dir) % classCount;
+    else if (f == 8)   /* butin : -1 (aucun) puis chaque objet */
+        m->drop = (m->drop + 1 + itemCount + 1 + dir) % (itemCount + 1) - 1;
+    else if (f == 9)
+        m->rate = clampInt(m->rate + dir * step * 5, 0, 100);
 }
 
 static void adjustClass(Class *c, int f, int dir, int step) {
@@ -642,6 +1145,20 @@ static void adjustAttack(Attack *a, int f, int dir, int step) {
         a->power = clampInt(a->power + dir * step, 1, 99);
     else if (f == 2)
         a->acc = clampInt(a->acc + dir * step * 5, 30, 100);
+}
+
+static void adjustItem(int idx, int f, int dir, int step) {
+    Item *it = &items[idx];
+
+    if (f == 0)
+        it->kind = (it->kind + IK_COUNT + dir) % IK_COUNT;
+    else if (f >= 1 && f <= 4)
+        it->bonus[f - 1] = clampInt(it->bonus[f - 1] + dir * step, 0, itemMax(f - 1));
+    else if (f == 5)
+        it->req = clampInt(it->req + dir * step, 1, MAX_LEVEL);
+    else if (f == 6)   /* nombre d'exemplaires possedes (pratique pour tester) */
+        hero.inv[idx] = clampInt(hero.inv[idx] + dir * step, 0, 99);
+    sanitizeAll();
 }
 
 static void adjustHero(int f, int dir, int step) {
@@ -755,6 +1272,8 @@ static void packMonster(const void *item, u8 *rec) {
     rec[NAME_BYTES + 9] = (u8)m->shape;
     rec[NAME_BYTES + 10] = (u8)m->level;
     rec[NAME_BYTES + 11] = (u8)m->cls;
+    rec[NAME_BYTES + 12] = (u8)((m->drop < 0) ? 255 : m->drop);
+    rec[NAME_BYTES + 13] = (u8)m->rate;
 }
 
 static void unpackMonster(void *item, const u8 *rec, int version) {
@@ -777,9 +1296,44 @@ static void unpackMonster(void *item, const u8 *rec, int version) {
         m->level = 3;
         m->cls = 3;
     }
+    if (version >= 3) {
+        m->drop = (rec[NAME_BYTES + 12] == 255) ? -1 : rec[NAME_BYTES + 12];
+        m->rate = clampInt(rec[NAME_BYTES + 13], 0, 100);
+    } else {            /* ancien fichier : une potion de temps en temps */
+        m->drop = 0;
+        m->rate = 30;
+    }
 }
 
-static bool saveTable(const char *path, const char *magic, int ver, const void *items,
+static void packItem(const void *item, u8 *rec) {
+    const Item *it = (const Item *)item;
+    int s;
+
+    memset(rec, 0, ITM_REC);
+    strncpy((char *)rec, it->name, NAME_BYTES - 1);
+    rec[NAME_BYTES] = (u8)it->kind;
+    for (s = 0; s < ST_COUNT; s++)
+        put16(rec + NAME_BYTES + 1 + 2 * s, it->bonus[s]);
+    rec[NAME_BYTES + 9] = (u8)it->req;
+}
+
+static void unpackItem(void *item, const u8 *rec, int version) {
+    Item *it = (Item *)item;
+    int s;
+
+    (void)version;
+    memset(it, 0, sizeof *it);
+    memcpy(it->name, rec, NAME_BYTES);
+    it->name[NAME_BYTES - 1] = '\0';
+    if (it->name[0] == '\0')
+        setName(it->name, "Objet");
+    it->kind = rec[NAME_BYTES] % IK_COUNT;
+    for (s = 0; s < ST_COUNT; s++)
+        it->bonus[s] = clampInt(get16(rec + NAME_BYTES + 1 + 2 * s), 0, itemMax(s));
+    it->req = clampInt(rec[NAME_BYTES + 9], 1, MAX_LEVEL);
+}
+
+static bool saveTable(const char *path, const char *magic, int ver, const void *data,
                       size_t itemSize, int count, size_t recSize, PackFn pack) {
     u8 header[MON_HEADER];
     u8 rec[128];
@@ -800,7 +1354,7 @@ static bool saveTable(const char *path, const char *magic, int ver, const void *
 
     ok = (fwrite(header, 1, MON_HEADER, f) == MON_HEADER);
     for (i = 0; ok && i < count; i++) {
-        pack((const u8 *)items + (size_t)i * itemSize, rec);
+        pack((const u8 *)data + (size_t)i * itemSize, rec);
         ok = (fwrite(rec, 1, recSize, f) == recSize);
     }
     fclose(f);
@@ -808,7 +1362,7 @@ static bool saveTable(const char *path, const char *magic, int ver, const void *
 }
 
 static bool loadTable(const char *path, const char *magic, int maxVer, int maxCount,
-                      void *items, size_t itemSize, size_t recSize, size_t recSizeV1,
+                      void *data, size_t itemSize, const size_t *recSizes,
                       UnpackFn unpack, int *outCount) {
     static u32 tmpBuf[1024];
     u8 *tmp = (u8 *)tmpBuf;
@@ -831,7 +1385,7 @@ static bool loadTable(const char *path, const char *magic, int maxVer, int maxCo
 
     ver = header[4];
     count = header[5];
-    rs = (ver == 1 && recSizeV1 != 0) ? recSizeV1 : recSize;
+    rs = recSizes[ver - 1];
     if ((size_t)count * itemSize > sizeof tmpBuf) {
         fclose(f);
         return false;
@@ -846,42 +1400,59 @@ static bool loadTable(const char *path, const char *magic, int maxVer, int maxCo
     }
     fclose(f);
 
-    memcpy(items, tmp, (size_t)count * itemSize);
+    memcpy(data, tmp, (size_t)count * itemSize);
     *outCount = count;
     return true;
 }
+
+static const size_t ATK_RECS[1] = { ATK_REC };
+static const size_t CLS_RECS[1] = { CLS_REC };
+static const size_t ITM_RECS[1] = { ITM_REC };
+static const size_t MON_RECS[3] = { MON_REC1, MON_REC2, MON_REC };
 
 static bool saveAttacks(void) {
     return saveTable(ATK_FILE, "RPGA", 1, attacks, sizeof(Attack), attackCount, ATK_REC, packAttack);
 }
 static bool loadAttacks(void) {
-    return loadTable(ATK_FILE, "RPGA", 1, MAX_ATTACKS, attacks, sizeof(Attack), ATK_REC, 0,
+    return loadTable(ATK_FILE, "RPGA", 1, MAX_ATTACKS, attacks, sizeof(Attack), ATK_RECS,
                      unpackAttack, &attackCount);
 }
 static bool saveClasses(void) {
     return saveTable(CLS_FILE, "RPGC", 1, classes, sizeof(Class), classCount, CLS_REC, packClass);
 }
 static bool loadClasses(void) {
-    return loadTable(CLS_FILE, "RPGC", 1, MAX_CLASSES, classes, sizeof(Class), CLS_REC, 0,
+    return loadTable(CLS_FILE, "RPGC", 1, MAX_CLASSES, classes, sizeof(Class), CLS_RECS,
                      unpackClass, &classCount);
 }
+static bool saveItems(void) {
+    return saveTable(ITM_FILE, "RPGI", 1, items, sizeof(Item), itemCount, ITM_REC, packItem);
+}
+static bool loadItems(void) {
+    return loadTable(ITM_FILE, "RPGI", 1, MAX_ITEMS, items, sizeof(Item), ITM_RECS,
+                     unpackItem, &itemCount);
+}
 static bool saveMonsters(void) {
-    return saveTable(MON_FILE, "RPGM", 2, monsters, sizeof(Monster), monsterCount, MON_REC, packMonster);
+    return saveTable(MON_FILE, "RPGM", 3, monsters, sizeof(Monster), monsterCount, MON_REC, packMonster);
 }
 static bool loadMonsters(void) {
-    return loadTable(MON_FILE, "RPGM", 2, MAX_MONSTERS, monsters, sizeof(Monster), MON_REC,
-                     MON_REC1, unpackMonster, &monsterCount);
+    return loadTable(MON_FILE, "RPGM", 3, MAX_MONSTERS, monsters, sizeof(Monster), MON_RECS,
+                     unpackMonster, &monsterCount);
 }
 
 static bool saveHero(void) {
-    u8 rec[11] = { 'R', 'P', 'G', 'H', 1, 0, 0, 0, 0, 0, 0 };
+    u8 rec[13 + MAX_ITEMS] = { 'R', 'P', 'G', 'H', 2 };
     FILE *f;
     bool ok;
+    int i;
 
     rec[5] = (u8)hero.cls;
     rec[6] = (u8)hero.level;
     put16(rec + 7, hero.xp);
     put16(rec + 9, hero.hp);
+    rec[11] = (u8)((hero.weapon < 0) ? 255 : hero.weapon);
+    rec[12] = (u8)((hero.armor < 0) ? 255 : hero.armor);
+    for (i = 0; i < MAX_ITEMS; i++)
+        rec[13 + i] = (u8)hero.inv[i];
 
     mkdir("sdmc:/3ds", 0777);
     mkdir(SAVE_DIR, 0777);
@@ -895,35 +1466,47 @@ static bool saveHero(void) {
 }
 
 static bool loadHero(void) {
-    u8 rec[11];
+    u8 rec[13 + MAX_ITEMS];
+    size_t got;
     FILE *f = fopen(HERO_FILE, "rb");
+    int i;
 
     if (f == NULL)
         return false;
-    if (fread(rec, 1, sizeof rec, f) != sizeof rec || memcmp(rec, "RPGH", 4) != 0 ||
-        rec[4] != 1) {
-        fclose(f);
-        return false;
-    }
+    memset(rec, 0, sizeof rec);
+    got = fread(rec, 1, sizeof rec, f);
     fclose(f);
+    if (got < 11 || memcmp(rec, "RPGH", 4) != 0 || rec[4] < 1 || rec[4] > 2)
+        return false;
+
     hero.cls = rec[5];
     hero.level = rec[6];
     hero.xp = get16(rec + 7);
     hero.hp = get16(rec + 9);
+    if (rec[4] >= 2 && got >= sizeof rec) {
+        hero.weapon = (rec[11] == 255) ? -1 : rec[11];
+        hero.armor = (rec[12] == 255) ? -1 : rec[12];
+        for (i = 0; i < MAX_ITEMS; i++)
+            hero.inv[i] = rec[13 + i];
+    } else {            /* ancien fichier : pas d'inventaire */
+        startKit();
+    }
     return true;
 }
 
 static bool saveAll(void) {
     bool a = saveAttacks();
     bool c = saveClasses();
+    bool it = saveItems();
     bool m = saveMonsters();
     bool h = saveHero();
-    return a && c && m && h;
+    return a && c && it && m && h;
 }
 
 static void loadAll(void) {
     if (!loadAttacks())  defaultAttacks();
     if (!loadClasses())  defaultClasses();
+    if (!loadItems())    defaultItems();
     if (!loadMonsters()) defaultMonsters();
     if (!loadHero())     defaultHero();
     sanitizeAll();
@@ -1048,7 +1631,7 @@ static bool tallAtPx(int px, int py) {
     ty = py / TS;
     if (tx >= MAP_W || ty >= MAP_H)
         return false;
-    return map[ty][tx] == T_TALL;
+    return tiles[map[ty][tx]].tall;
 }
 
 /* le monstre reste toujours dans les hautes herbes */
@@ -1096,7 +1679,7 @@ static void wildTrySpawn(void) {
 
         if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H)
             continue;
-        if (map[ty][tx] != T_TALL)
+        if (!tiles[map[ty][tx]].tall)
             continue;
         ddx = tx - ptx;
         ddy = ty - pty;
@@ -1183,7 +1766,7 @@ static bool wildUpdate(void) {
 
 /* ---------- Etat global ---------- */
 
-enum { S_TITLE, S_PLAY, S_EDIT, S_EDMENU, S_FORM, S_BATTLE };
+enum { S_TITLE, S_PLAY, S_EDIT, S_EDMENU, S_FORM, S_BATTLE, S_INV, S_BLOCKS, S_CALIB };
 
 static int state = S_TITLE;
 static bool running = true;
@@ -1213,19 +1796,22 @@ static Button titleButtons[N_TITLE_BUTTONS] = {
     { 50, 150, 220, 44, "Quitter",   true },
 };
 
-#define N_ED_BUTTONS 6
+#define N_ED_BUTTONS 8
 
 static Button edButtons[N_ED_BUTTONS] = {
-    { 50,   8, 220, 30, "Carte",    true },
-    { 50,  44, 220, 30, "Monstres", true },
-    { 50,  80, 220, 30, "Classes",  true },
-    { 50, 116, 220, 30, "Attaques", true },
-    { 50, 152, 220, 30, "Héros",    true },
-    { 50, 192, 220, 30, "Retour",   true },
+    { 50,   4, 220, 24, "Carte",    true },
+    { 50,  32, 220, 24, "Blocs",    true },
+    { 50,  60, 220, 24, "Monstres", true },
+    { 50,  88, 220, 24, "Classes",  true },
+    { 50, 116, 220, 24, "Attaques", true },
+    { 50, 144, 220, 24, "Objets",   true },
+    { 50, 172, 220, 24, "Héros",    true },
+    { 50, 206, 220, 26, "Retour",   true },
 };
 static int edSel = 0;
 
 static Button playTitleButton = { 222, 10, 88, 40, "Titre", true };
+static Button playInvButton   = { 222, 56, 88, 40, "Sac", true };
 
 static int sel = 0;
 
@@ -1291,7 +1877,7 @@ typedef struct {
     int mStat[ST_COUNT];   /* stats du monstre a son niveau (PV = PV max) */
     int mHp;
     int pHp, pMax;
-    int phase, result, xpGain;
+    int phase, result, xpGain, dropItem;
     BMsg msgs[MAX_MSGS];
     int nMsgs, cur;
 } Battle;
@@ -1303,6 +1889,7 @@ static Button batBtn[4] = {
     {   8, 120, 148, 44, "", true }, { 164, 120, 148, 44, "", true },
 };
 static Button batFlee = { 8, 178, 100, 34, "Fuite", true };
+static Button batPotion = { 116, 178, 110, 34, "Potion", true };
 
 static void addMsg(const char *text, int act, int val) {
     if (bt.nMsgs >= MAX_MSGS)
@@ -1339,6 +1926,7 @@ static bool startBattle(int mi) {
     int s;
 
     memset(&bt, 0, sizeof bt);
+    bt.dropItem = -1;
     bt.mon = mi;
     bt.mLevel = clampInt(m->level + (int)(rnd() % 3) - 1, 1, MAX_LEVEL);
     for (s = 0; s < ST_COUNT; s++)
@@ -1400,7 +1988,46 @@ static void doAction(bool byPlayer, const Attack *a, int *pHp, int *mHp) {
     }
 }
 
-/* atkSlot : 0..3 = attaque choisie, -1 = tentative de fuite */
+/* nombre de potions de soin que le heros possede */
+static int potionCount(void) {
+    int i, n = 0;
+
+    for (i = 0; i < itemCount; i++)
+        if (items[i].kind == IK_POTION && items[i].bonus[ST_HP] > 0)
+            n += hero.inv[i];
+    return n;
+}
+
+/* la potion la plus adaptee : la plus petite qui soigne tout, sinon la plus grosse */
+static int bestPotion(int missing) {
+    int i, best = -1;
+
+    for (i = 0; i < itemCount; i++) {
+        int h, b;
+        bool hFits, bFits;
+
+        if (items[i].kind != IK_POTION || items[i].bonus[ST_HP] <= 0 || hero.inv[i] <= 0)
+            continue;
+        if (best < 0) {
+            best = i;
+            continue;
+        }
+        h = items[i].bonus[ST_HP];
+        b = items[best].bonus[ST_HP];
+        hFits = (h >= missing);
+        bFits = (b >= missing);
+        if (hFits && bFits) {
+            if (h < b) best = i;
+        } else if (hFits) {
+            best = i;
+        } else if (!bFits && h > b) {
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* atkSlot : 0..3 = attaque choisie, -1 = tentative de fuite, -2 = boire une potion */
 static void playTurn(int atkSlot) {
     const Class *pc = &classes[hero.cls];
     const Class *mc = &classes[monsters[bt.mon].cls];
@@ -1412,7 +2039,7 @@ static void playTurn(int atkSlot) {
 
     bt.nMsgs = 0;
 
-    if (atkSlot < 0) {
+    if (atkSlot == -1) {
         int chance = clampInt(50 + (pSpd - mSpd) * 3, 20, 95);
 
         if ((int)(rnd() % 100) < chance) {
@@ -1423,6 +2050,23 @@ static void playTurn(int atkSlot) {
         }
         addMsg("Impossible de fuir !", A_NONE, 0);
         playerFirst = false;   /* le monstre en profite */
+    }
+
+    if (atkSlot == -2) {
+        int missing = bt.pMax - pHp;
+        int pi = bestPotion(missing);
+        int amount;
+
+        if (pi < 0 || missing <= 0)
+            return;
+        hero.inv[pi]--;
+        amount = clampInt(items[pi].bonus[ST_HP], 0, missing);
+        pHp += amount;
+        snprintf(buf, sizeof buf, "Tu bois %s !", items[pi].name);
+        addMsg(buf, A_NONE, 0);
+        snprintf(buf, sizeof buf, "+%d PV", amount);
+        addMsg(buf, A_HEAL_P, amount);
+        playerFirst = true;   /* c'est son action : ensuite c'est au monstre */
     }
 
     for (i = 0; i < 2; i++) {
@@ -1457,6 +2101,15 @@ static void playTurn(int atkSlot) {
                 lv++;
                 snprintf(buf, sizeof buf, "Niveau %d atteint !", lv);
                 addMsg(buf, A_NONE, 0);
+            }
+            {
+                const Monster *mm = &monsters[bt.mon];
+
+                if (mm->drop >= 0 && mm->drop < itemCount && (int)(rnd() % 100) < mm->rate) {
+                    bt.dropItem = mm->drop;
+                    snprintf(buf, sizeof buf, "Tu trouves : %s !", items[mm->drop].name);
+                    addMsg(buf, A_NONE, 0);
+                }
             }
             bt.result = R_WIN;
             break;
@@ -1493,6 +2146,8 @@ static void finishBattle(void) {
     if (bt.result == R_WIN) {
         hero.hp = bt.pHp;
         giveXp(bt.xpGain);
+        if (bt.dropItem >= 0)
+            hero.inv[bt.dropItem] = clampInt(hero.inv[bt.dropItem] + 1, 0, 99);
         maxHp = heroStat(ST_HP);
         hero.hp = clampInt(hero.hp + maxHp / 4, 1, maxHp);   /* un peu de repos */
         snprintf(encMsg, sizeof encMsg, "Victoire ! +%d XP", bt.xpGain);
@@ -1546,6 +2201,130 @@ static void updateBattle(u32 kDown) {
         }
         if (inRect(&batFlee, t.px, t.py))
             playTurn(-1);
+        else if (inRect(&batPotion, t.px, t.py) && bt.pHp < bt.pMax)
+            playTurn(-2);
+    }
+}
+
+/* ---------- Inventaire ---------- */
+
+#define INV_ROWS 6
+
+static int invList[MAX_ITEMS];   /* numeros des objets possedes, tries par type */
+static int invN = 0;
+static int invSel = 0;
+static int invScroll = 0;
+static char invMsg[64] = "";
+static int invMsgTimer = 0;
+
+static Button invUp   = { 282,  30, 34,  70, "^",       true };
+static Button invDown = { 282, 116, 34,  70, "v",       true };
+static Button invAct  = {   6, 196, 150, 36, "Équiper", true };
+static Button invBack = { 164, 196, 150, 36, "Retour",  true };
+
+static Button invRow(int r) {
+    Button b = { 6, 30.0f + r * 26, 270, 24, "", true };
+    return b;
+}
+
+static void invClamp(void) {
+    invSel = clampInt(invSel, 0, invN > 0 ? invN - 1 : 0);
+    if (invSel < invScroll) invScroll = invSel;
+    if (invSel >= invScroll + INV_ROWS) invScroll = invSel - INV_ROWS + 1;
+    invScroll = clampInt(invScroll, 0, invN > INV_ROWS ? invN - INV_ROWS : 0);
+}
+
+static void rebuildInv(void) {
+    int k, i;
+
+    invN = 0;
+    for (k = 0; k < IK_COUNT; k++)
+        for (i = 0; i < itemCount; i++)
+            if (items[i].kind == k && hero.inv[i] > 0)
+                invList[invN++] = i;
+    invClamp();
+}
+
+static void enterInventory(void) {
+    invMsg[0] = '\0';
+    invMsgTimer = 0;
+    rebuildInv();
+    state = S_INV;
+}
+
+static void invAction(void) {
+    int idx, maxHp;
+
+    if (invN == 0)
+        return;
+    idx = invList[invSel];
+
+    if (items[idx].kind == IK_POTION) {
+        maxHp = heroStat(ST_HP);
+        if (hero.hp >= maxHp) {
+            snprintf(invMsg, sizeof invMsg, "Tes PV sont déjà au maximum");
+        } else {
+            int heal = clampInt(items[idx].bonus[ST_HP], 0, maxHp - hero.hp);
+            hero.hp += heal;
+            hero.inv[idx]--;
+            snprintf(invMsg, sizeof invMsg, "%s : +%d PV", items[idx].name, heal);
+        }
+    } else {
+        int *slot = (items[idx].kind == IK_WEAPON) ? &hero.weapon : &hero.armor;
+
+        if (*slot == idx) {
+            *slot = -1;
+            snprintf(invMsg, sizeof invMsg, "Retiré : %s", items[idx].name);
+        } else if (hero.level < items[idx].req) {
+            snprintf(invMsg, sizeof invMsg, "Niveau %d requis !", items[idx].req);
+        } else {
+            *slot = idx;
+            snprintf(invMsg, sizeof invMsg, "Équipé : %s", items[idx].name);
+        }
+        maxHp = heroStat(ST_HP);
+        if (hero.hp > maxHp)
+            hero.hp = maxHp;
+    }
+    invMsgTimer = 150;
+    rebuildInv();
+    saveHero();
+}
+
+static void updateInventory(u32 kDown) {
+    int r;
+
+    if (invMsgTimer > 0)
+        invMsgTimer--;
+
+    if (kDown & KEY_DOWN) { invSel++; invClamp(); }
+    if (kDown & KEY_UP)   { invSel--; invClamp(); }
+    if (kDown & KEY_A)    invAction();
+    if (kDown & (KEY_B | KEY_X)) {
+        saveHero();
+        state = S_PLAY;
+        return;
+    }
+
+    if (kDown & KEY_TOUCH) {
+        touchPosition t;
+
+        hidTouchRead(&t);
+        if (inRect(&invBack, t.px, t.py)) {
+            saveHero();
+            state = S_PLAY;
+            return;
+        }
+        if (inRect(&invAct, t.px, t.py))  invAction();
+        if (inRect(&invUp, t.px, t.py))   { invSel--; invClamp(); }
+        if (inRect(&invDown, t.px, t.py)) { invSel++; invClamp(); }
+        for (r = 0; r < INV_ROWS; r++) {
+            Button b = invRow(r);
+
+            if (inRect(&b, t.px, t.py) && invScroll + r < invN) {
+                invSel = invScroll + r;
+                invClamp();
+            }
+        }
     }
 }
 
@@ -1606,12 +2385,17 @@ static void activate(int i) {
     }
 }
 
+static void enterBlocks(void);
+static void enterCalib(int ret);
+
 static void activateEd(int i) {
     if (i == 0) {
         loadOrDefault();
         enterEditor();
-    } else if (i <= 4) {
-        enterForm(i - 1);
+    } else if (i == 1) {
+        enterBlocks();
+    } else if (i <= 6) {
+        enterForm(i - 2);
     } else {
         state = S_TITLE;
     }
@@ -1646,6 +2430,7 @@ static void updateEdMenu(u32 kDown) {
     if (kDown & KEY_UP)   edSel = (edSel + N_ED_BUTTONS - 1) % N_ED_BUTTONS;
     if (kDown & KEY_A)    activateEd(edSel);
     if (kDown & KEY_B)    state = S_TITLE;
+    if (kDown & KEY_Y)    enterCalib(S_EDMENU);
 
     if (kDown & KEY_TOUCH) {
         touchPosition t;
@@ -1703,6 +2488,11 @@ static void updatePlay(u32 kDown, u32 kHeld) {
     if (wildUpdate())
         return;
 
+    if (kDown & KEY_X) {
+        enterInventory();
+        return;
+    }
+
     if (kDown & KEY_SELECT)
         leavePlay();
 
@@ -1711,6 +2501,8 @@ static void updatePlay(u32 kDown, u32 kHeld) {
         hidTouchRead(&t);
         if (inRect(&playTitleButton, t.px, t.py))
             leavePlay();
+        else if (inRect(&playInvButton, t.px, t.py))
+            enterInventory();
     }
 }
 
@@ -1736,8 +2528,9 @@ static void updateEdit(u32 kDown, u32 kHeld) {
         editMsgTimer--;
 
     /* choix de la tuile */
-    if (kDown & KEY_L) editTile = (editTile + T_COUNT - 1) % T_COUNT;
-    if (kDown & KEY_R) editTile = (editTile + 1) % T_COUNT;
+    if (editTile >= tileCount) editTile = 0;
+    if (kDown & KEY_L) editTile = (editTile + tileCount - 1) % tileCount;
+    if (kDown & KEY_R) editTile = (editTile + 1) % tileCount;
 
     /* defilement de la zone d'edition */
     if (stepRepeat(kDown, kHeld, KEY_LEFT,  &rep[0])) mx = -1;
@@ -1787,29 +2580,356 @@ static void updateEdit(u32 kDown, u32 kHeld) {
     }
 }
 
+/* ---------- Editeur de blocs : creer des blocs et dessiner leurs textures ---------- */
+
+static int blkSel = 0;          /* bloc modifie */
+static int blkColor = 13;       /* couleur choisie (numero de la palette) */
+static int blkTool = 0;         /* 0 crayon, 1 seau, 2 pipette */
+static int blkDelTimer = 0;     /* > 0 : on attend la confirmation de suppression */
+static bool blkPainting = false;
+static int calibReturn = S_EDMENU;
+
+#define BK_CX    6      /* zone de dessin : position et taille d'un pixel */
+#define BK_CY    30
+#define BK_CELL  10
+#define BK_PX    172    /* palette de 32 couleurs */
+#define BK_PY    30
+#define BK_PITCH 18
+
+static Button bkPrev = {   4,   4,  40, 22, "<", true };
+static Button bkNext = { 276,   4,  40, 22, ">", true };
+static Button bkName = {  48,   4, 224, 22, "",  true };
+static Button bkTools[3] = {
+    { 172, 106, 46, 24, "Crayon",  true },
+    { 221, 106, 46, 24, "Seau",    true },
+    { 270, 106, 46, 24, "Pipette", true },
+};
+static Button bkSolid = { 172, 136, 144, 22, "", true };
+static Button bkTall  = { 172, 162, 144, 22, "", true };
+static Button bkNew   = {   6, 204,  74, 28, "Nouveau", true };
+static Button bkCopy  = {  84, 204,  74, 28, "Copier",  true };
+static Button bkDel   = { 162, 204,  74, 28, "Suppr.",  true };
+static Button bkBack  = { 240, 204,  74, 28, "Retour",  true };
+
+/* comme drawButton, avec une taille de texte au choix */
+static void drawButtonSc(const Button *b, bool selected, float sc) {
+    u32 border = selected ? COL(255, 220, 80) : COL(20, 20, 30);
+    u32 fill = b->enabled ? COL(60, 90, 160) : COL(70, 70, 80);
+    u32 txt = b->enabled ? COL(255, 255, 255) : COL(160, 160, 170);
+
+    C2D_DrawRectSolid(b->x - 3, b->y - 3, 0.0f, b->w + 6, b->h + 6, border);
+    C2D_DrawRectSolid(b->x, b->y, 0.1f, b->w, b->h, fill);
+    drawTextInRect(b->label, b->x, b->y, b->w, b->h, sc, txt);
+}
+
+/* clavier de la console pour choisir un nom */
+static bool askText(char *text, size_t cap, const char *hint, int maxChars) {
+    SwkbdState swkbd;
+    SwkbdButton button;
+    char buf[NAME_BYTES];
+
+    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, maxChars);
+    swkbdSetInitialText(&swkbd, text);
+    swkbdSetHintText(&swkbd, hint);
+    swkbdSetButton(&swkbd, SWKBD_BUTTON_LEFT, "Annuler", false);
+    swkbdSetButton(&swkbd, SWKBD_BUTTON_RIGHT, "OK", true);
+    swkbdSetValidation(&swkbd, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+
+    button = swkbdInputText(&swkbd, buf, sizeof buf);
+    if (button != SWKBD_BUTTON_RIGHT)
+        return false;
+    snprintf(text, cap, "%s", buf);
+    return true;
+}
+
+/* a appeler quand les pixels du bloc modifie ont change */
+static void blkChanged(void) {
+    tileRecolor(&tiles[blkSel]);
+    atlasWriteSlot(blkSel, &tiles[blkSel].pix[0][0]);
+    atlasDirty = true;
+}
+
+/* nouveau bloc : vide (src = NULL) ou copie d'un autre ; renvoie son numero ou -1 */
+static int tileNew(const Tile *src) {
+    Tile *t;
+    char nm[TILE_NAME];
+
+    if (tileCount >= MAX_TILES)
+        return -1;
+    t = &tiles[tileCount];
+    if (src != NULL) {
+        *t = *src;
+        snprintf(nm, sizeof nm, "Copie %d", tileCount + 1);
+    } else {
+        tileSet(t, "", false, false, blkColor);
+        snprintf(nm, sizeof nm, "Bloc %d", tileCount + 1);
+    }
+    snprintf(t->name, TILE_NAME, "%s", nm);
+    tileRecolor(t);
+    atlasWriteSlot(tileCount, &t->pix[0][0]);
+    atlasDirty = true;
+    return tileCount++;
+}
+
+/* le seau : remplit la zone de meme couleur */
+static void floodFill(Tile *t, int sx, int sy, int newc) {
+    static const int D[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+    int stack[256];
+    int sp = 0;
+    int old = t->pix[sy][sx];
+
+    if (old == newc)
+        return;
+    t->pix[sy][sx] = (u8)newc;
+    stack[sp++] = sy * 16 + sx;
+    while (sp > 0) {
+        int p = stack[--sp];
+        int x = p % 16, y = p / 16, k;
+        for (k = 0; k < 4; k++) {
+            int nx = x + D[k][0], ny = y + D[k][1];
+            if (nx < 0 || ny < 0 || nx > 15 || ny > 15)
+                continue;
+            if (t->pix[ny][nx] != old)
+                continue;
+            t->pix[ny][nx] = (u8)newc;
+            stack[sp++] = ny * 16 + nx;
+        }
+    }
+}
+
+static void enterBlocks(void) {
+    loadOrDefault();   /* la carte en memoire doit etre celle de la carte SD */
+    if (blkSel >= tileCount)
+        blkSel = 0;
+    blkPainting = false;
+    blkDelTimer = 0;
+    state = S_BLOCKS;
+}
+
+/* 0 <  1 >  2 nom  3-5 outils  6 solide  7 rencontres  8 nouveau  9 copier
+ * 10 supprimer  11 retour  20-51 couleurs ; -1 si rien */
+static int hitTestBlk(int px, int py) {
+    int i, c, r;
+
+    if (inRect(&bkPrev, px, py)) return 0;
+    if (inRect(&bkNext, px, py)) return 1;
+    if (inRect(&bkName, px, py)) return 2;
+    for (i = 0; i < 3; i++)
+        if (inRect(&bkTools[i], px, py)) return 3 + i;
+    if (inRect(&bkSolid, px, py)) return 6;
+    if (inRect(&bkTall, px, py))  return 7;
+    if (inRect(&bkNew, px, py))   return 8;
+    if (inRect(&bkCopy, px, py))  return 9;
+    if (inRect(&bkDel, px, py))   return 10;
+    if (inRect(&bkBack, px, py))  return 11;
+
+    if (px >= BK_PX && py >= BK_PY) {
+        c = (px - BK_PX) / BK_PITCH;
+        r = (py - BK_PY) / BK_PITCH;
+        if (c < 8 && r < 4 && (px - BK_PX) % BK_PITCH < 16 && (py - BK_PY) % BK_PITCH < 16)
+            return 20 + r * 8 + c;
+    }
+    return -1;
+}
+
+static void pressBlk(int id) {
+    Tile *t = &tiles[blkSel];
+    int n;
+
+    if (id != 10)
+        blkDelTimer = 0;
+
+    switch (id) {
+    case 0:
+        blkSel = (blkSel + tileCount - 1) % tileCount;
+        break;
+    case 1:
+        blkSel = (blkSel + 1) % tileCount;
+        break;
+    case 2:
+        if (askText(t->name, TILE_NAME, "Nom du bloc", 12))
+            tileRecolor(t);
+        break;
+    case 3:
+    case 4:
+    case 5:
+        blkTool = id - 3;
+        break;
+    case 6:
+        t->solid = !t->solid;
+        break;
+    case 7:
+        t->tall = !t->tall;
+        break;
+    case 8:
+        n = tileNew(NULL);
+        if (n >= 0)
+            blkSel = n;
+        break;
+    case 9:
+        n = tileNew(t);
+        if (n >= 0)
+            blkSel = n;
+        break;
+    case 10:
+        if (tileCount > 1) {
+            if (blkDelTimer > 0) {
+                tileDelete(blkSel);
+                if (blkSel >= tileCount)
+                    blkSel = tileCount - 1;
+                if (editTile >= tileCount)
+                    editTile = 0;
+                atlasRebuild();
+                blkDelTimer = 0;
+            } else {
+                blkDelTimer = 120;   /* il faut retoucher le bouton pour confirmer */
+            }
+        }
+        break;
+    case 11:
+        saveTiles();
+        saveMap();
+        state = S_EDMENU;
+        break;
+    default:
+        if (id >= 20 && id <= 51)
+            blkColor = id - 20;
+        break;
+    }
+}
+
+/* le stylet touche la zone de dessin en (px, py) */
+static void blkApply(int px, int py, bool first) {
+    Tile *t = &tiles[blkSel];
+    int cx, cy;
+
+    if (px < BK_CX || py < BK_CY)
+        return;
+    cx = (px - BK_CX) / BK_CELL;
+    cy = (py - BK_CY) / BK_CELL;
+    if (cx > 15 || cy > 15)
+        return;
+
+    if (blkTool == 0) {
+        if (t->pix[cy][cx] != blkColor) {
+            t->pix[cy][cx] = (u8)blkColor;
+            blkChanged();
+        }
+    } else if (blkTool == 1) {
+        if (first) {
+            floodFill(t, cx, cy, blkColor);
+            blkChanged();
+        }
+    } else if (first) {
+        blkColor = t->pix[cy][cx];   /* pipette : on reprend cette couleur */
+        blkTool = 0;
+    }
+}
+
+static void enterCalib(int ret) {
+    calibReturn = ret;
+    state = S_CALIB;
+}
+
+static void updateBlocks(u32 kDown, u32 kHeld) {
+    touchPosition t;
+
+    if (blkDelTimer > 0)
+        blkDelTimer--;
+
+    if (kDown & KEY_L) pressBlk(0);
+    if (kDown & KEY_R) pressBlk(1);
+    if (kDown & KEY_Y) {
+        enterCalib(S_BLOCKS);
+        return;
+    }
+    if (kDown & KEY_SELECT) {
+        pressBlk(11);
+        return;
+    }
+
+    if (kDown & KEY_TOUCH) {
+        int id;
+        hidTouchRead(&t);
+        id = hitTestBlk(t.px, t.py);
+        if (id >= 0) {
+            pressBlk(id);
+            blkPainting = false;
+        } else if (t.px >= BK_CX && t.px < BK_CX + 16 * BK_CELL &&
+                   t.py >= BK_CY && t.py < BK_CY + 16 * BK_CELL) {
+            blkPainting = true;
+            blkApply(t.px, t.py, true);
+        }
+    } else if ((kHeld & KEY_TOUCH) && blkPainting) {
+        hidTouchRead(&t);
+        blkApply(t.px, t.py, false);
+    }
+
+    if (!(kHeld & KEY_TOUCH))
+        blkPainting = false;
+}
+
+/* ---------- Reglage d'affichage des textures ---------- */
+
+static Button caBtn[3] = {
+    { 6,  44, 308, 34, "", true },
+    { 6,  86, 308, 34, "", true },
+    { 6, 128, 308, 34, "", true },
+};
+static Button caOk = { 6, 190, 308, 40, "Terminé", true };
+
+static void updateCalib(u32 kDown) {
+    touchPosition t;
+    int i;
+
+    if (kDown & (KEY_B | KEY_SELECT)) {
+        saveDisplay();
+        state = calibReturn;
+        return;
+    }
+    if (kDown & KEY_TOUCH) {
+        hidTouchRead(&t);
+        for (i = 0; i < 3; i++) {
+            if (inRect(&caBtn[i], t.px, t.py)) {
+                if (i == 0)      texFlipV = !texFlipV;
+                else if (i == 1) texBswap = !texBswap;
+                else             texSwapXY = !texSwapXY;
+                atlasRebuild();
+            }
+        }
+        if (inRect(&caOk, t.px, t.py)) {
+            saveDisplay();
+            state = calibReturn;
+        }
+    }
+}
+
 /* ---------- Mise a jour : editeurs (monstres, classes, attaques, heros) ---------- */
 
 static int formPage = 0;
 
-static const char *const FORM_TITLES[FM_COUNT] = { "Monstre", "Classe", "Attaque", "Héros" };
-static const int FORM_FIELDS[FM_COUNT] = { 8, 12, 3, 2 };
-static const int FORM_PERPAGE[FM_COUNT] = { 6, 4, 6, 6 };
+static const char *const FORM_TITLES[FM_COUNT] = { "Monstre", "Classe", "Attaque", "Objet", "Héros" };
+static const int FORM_FIELDS[FM_COUNT] = { 10, 12, 3, 7, 2 };
+static const int FORM_PERPAGE[FM_COUNT] = { 6, 4, 6, 6, 6 };
 
 static const char *const FORM_LABELS[FM_COUNT][12] = {
-    { "PV", "Attaque", "Défense", "Vitesse", "Couleur", "Forme", "Niveau", "Classe" },
+    { "PV", "Attaque", "Défense", "Vitesse", "Couleur", "Forme", "Niveau", "Classe", "Butin", "Taux" },
     { "PV de base", "Attaque", "Défense", "Vitesse", "PV / niveau", "Atq / niveau",
       "Déf / niveau", "Vit / niveau", "Attaque 1", "Attaque 2", "Attaque 3", "Attaque 4" },
     { "Type", "Puissance", "Précision" },
+    { "Type", "PV", "Attaque", "Défense", "Vitesse", "Niv. requis", "Possédés" },
     { "Classe", "Niveau" },
 };
 
 static const char *const KIND_NAMES[K_COUNT] = { "Dégâts", "Soin" };
+static const char *const ITEM_KIND_NAMES[IK_COUNT] = { "Arme", "Armure", "Potion" };
 
 static int formCount(void) {
     switch (formKind) {
     case FM_MONSTERS: return monsterCount;
     case FM_CLASSES:  return classCount;
     case FM_ATTACKS:  return attackCount;
+    case FM_ITEMS:    return itemCount;
     default:          return 1;
     }
 }
@@ -1823,6 +2943,7 @@ static char *formName(int i) {
     case FM_MONSTERS: return monsters[i].name;
     case FM_CLASSES:  return classes[i].name;
     case FM_ATTACKS:  return attacks[i].name;
+    case FM_ITEMS:    return items[i].name;
     default:          return NULL;
     }
 }
@@ -1832,6 +2953,7 @@ static bool formCanAdd(void) {
     case FM_MONSTERS: return monsterCount < MAX_MONSTERS;
     case FM_CLASSES:  return classCount < MAX_CLASSES;
     case FM_ATTACKS:  return attackCount < MAX_ATTACKS;
+    case FM_ITEMS:    return itemCount < MAX_ITEMS;
     default:          return false;
     }
 }
@@ -1843,9 +2965,10 @@ static bool formCanDel(void) {
 /* seuls les nombres se repetent quand on garde le stylet appuye */
 static bool formNumeric(int f) {
     switch (formKind) {
-    case FM_MONSTERS: return f < 4 || f == 6;
+    case FM_MONSTERS: return f < 4 || f == 6 || f == 9;
     case FM_CLASSES:  return f < 8;
     case FM_ATTACKS:  return f == 1 || f == 2;
+    case FM_ITEMS:    return f >= 1;
     default:          return f == 1;
     }
 }
@@ -1859,7 +2982,9 @@ static void formText(int i, int f, char *buf, size_t n) {
         else if (f == 4) snprintf(buf, n, "%s", COLOR_NAMES[m->color]);
         else if (f == 5) snprintf(buf, n, "%s", SHAPE_NAMES[m->shape]);
         else if (f == 6) snprintf(buf, n, "%d", m->level);
-        else             snprintf(buf, n, "%s", classes[m->cls].name);
+        else if (f == 7) snprintf(buf, n, "%s", classes[m->cls].name);
+        else if (f == 8) snprintf(buf, n, "%s", (m->drop >= 0) ? items[m->drop].name : "Aucun");
+        else             snprintf(buf, n, "%d %%", m->rate);
         break;
     }
     case FM_CLASSES: {
@@ -1876,6 +3001,14 @@ static void formText(int i, int f, char *buf, size_t n) {
         else             snprintf(buf, n, "%d %%", a->acc);
         break;
     }
+    case FM_ITEMS: {
+        const Item *it = &items[i];
+        if (f == 0)      snprintf(buf, n, "%s", ITEM_KIND_NAMES[it->kind]);
+        else if (f <= 4) snprintf(buf, n, "+%d", it->bonus[f - 1]);
+        else if (f == 5) snprintf(buf, n, "%d", it->req);
+        else             snprintf(buf, n, "%d", hero.inv[i]);
+        break;
+    }
     default:
         if (f == 0) snprintf(buf, n, "%s", classes[hero.cls].name);
         else        snprintf(buf, n, "%d", hero.level);
@@ -1888,6 +3021,7 @@ static void formAdjust(int i, int f, int dir, int step) {
     case FM_MONSTERS: adjustMonster(&monsters[i], f, dir, step); break;
     case FM_CLASSES:  adjustClass(&classes[i], f, dir, step); break;
     case FM_ATTACKS:  adjustAttack(&attacks[i], f, dir, step); break;
+    case FM_ITEMS:    adjustItem(i, f, dir, step); break;
     default:          adjustHero(f, dir, step); break;
     }
 }
@@ -1973,6 +3107,7 @@ static void pressForm(int id, int step) {
             if (formKind == FM_MONSTERS) monsterNew();
             else if (formKind == FM_CLASSES) classNew();
             else if (formKind == FM_ATTACKS) attackNew();
+            else if (formKind == FM_ITEMS) itemNew();
         }
         break;
     case 3:
@@ -1981,6 +3116,7 @@ static void pressForm(int id, int step) {
                 if (formKind == FM_MONSTERS) monsterDelete();
                 else if (formKind == FM_CLASSES) classDelete();
                 else if (formKind == FM_ATTACKS) attackDelete();
+                else if (formKind == FM_ITEMS) itemDelete();
                 delTimer = 0;
             } else {
                 delTimer = 120;   /* il faut retoucher le bouton pour confirmer */
@@ -2063,7 +3199,7 @@ static void drawTitleTop(void) {
     drawTextCX("RPG 2DS", TOP_W / 2, 30, 1.6f, COL(255, 255, 255));
     drawTextCX("Petit RPG avec éditeur intégré", TOP_W / 2, 105, 0.6f,
                COL(200, 210, 255));
-    drawTextCX("Étape 5 : combats et classes", TOP_W / 2, 130, 0.5f,
+    drawTextCX("Étape 6 : inventaire et équipement", TOP_W / 2, 130, 0.5f,
                COL(150, 160, 190));
 }
 
@@ -2077,63 +3213,7 @@ static void drawTitleBottom(void) {
                COL(170, 170, 190));
 }
 
-/* ---------- Dessin : tuiles ---------- */
-
-static void drawTileDetail(int t, int tx, int ty, float sx, float sy) {
-    switch (t) {
-    case T_GRASS:
-        if ((tx * 7 + ty * 13) % 5 == 0)
-            C2D_DrawRectSolid(sx + 5, sy + 7, 0.05f, 2, 2, COL(55, 130, 48));
-        break;
-    case T_WATER:
-        if ((tx + ty) % 2 == 0)
-            C2D_DrawRectSolid(sx + 3, sy + 6, 0.05f, 10, 2, COL(110, 170, 240));
-        break;
-    case T_TREE:
-        C2D_DrawRectSolid(sx + 3, sy + 2, 0.05f, 10, 8, COL(50, 150, 60));
-        C2D_DrawRectSolid(sx + 6, sy + 10, 0.05f, 4, 6, COL(110, 70, 30));
-        break;
-    case T_WALL:
-        C2D_DrawRectSolid(sx, sy + 7, 0.05f, TS, 1, COL(80, 80, 90));
-        C2D_DrawRectSolid(sx + 8, sy, 0.05f, 1, 7, COL(80, 80, 90));
-        C2D_DrawRectSolid(sx + 4, sy + 8, 0.05f, 1, 8, COL(80, 80, 90));
-        break;
-    case T_DOOR:
-        C2D_DrawRectSolid(sx + 3, sy, 0.05f, 10, TS, COL(80, 45, 15));
-        break;
-    case T_TALL:
-        C2D_DrawRectSolid(sx + 2, sy + 6, 0.05f, 2, 9, COL(95, 190, 85));
-        C2D_DrawRectSolid(sx + 7, sy + 2, 0.05f, 2, 12, COL(80, 175, 75));
-        C2D_DrawRectSolid(sx + 12, sy + 7, 0.05f, 2, 8, COL(95, 190, 85));
-        C2D_DrawRectSolid(sx + 1, sy + 14, 0.05f, 14, 2, COL(35, 100, 38));
-        break;
-    default:
-        break;
-    }
-}
-
 /* ---------- Dessin : jeu ---------- */
-
-static void drawMapTop(void) {
-    int tx0 = camX / TS;
-    int ty0 = camY / TS;
-    int tx1 = (camX + TOP_W - 1) / TS;
-    int ty1 = (camY + TOP_H - 1) / TS;
-    int tx, ty;
-
-    if (tx1 >= MAP_W) tx1 = MAP_W - 1;
-    if (ty1 >= MAP_H) ty1 = MAP_H - 1;
-
-    for (ty = ty0; ty <= ty1; ty++) {
-        for (tx = tx0; tx <= tx1; tx++) {
-            float sx = (float)(tx * TS - camX);
-            float sy = (float)(ty * TS - camY);
-            int t = map[ty][tx];
-            C2D_DrawRectSolid(sx, sy, 0.0f, TS, TS, TILES[t].color);
-            drawTileDetail(t, tx, ty, sx, sy);
-        }
-    }
-}
 
 static void drawMonsterArt(int shape, int colorIdx, float x, float y, float px);
 
@@ -2243,8 +3323,9 @@ static void drawPlayBottom(void) {
     py = MY + (player.y + PH / 2) * (float)MS / TS;
     C2D_DrawRectSolid(px - 1, py - 1, 0.2f, 3, 3, COL(255, 0, 0));
 
-    /* bouton */
+    /* boutons */
     drawButton(&playTitleButton, false);
+    drawButton(&playInvButton, false);
 
     /* infos */
     snprintf(buf, sizeof buf, "%s niv. %d   PV %d/%d", classes[hero.cls].name,
@@ -2254,7 +3335,7 @@ static void drawPlayBottom(void) {
     drawText(buf, 10, 156, 0.5f, white);
     snprintf(buf, sizeof buf, "Sur : %s", TILES[map[cy][cx]].name);
     drawText(buf, 10, 172, 0.5f, gray);
-    drawText("Stick : bouger    B : courir", 10, 188, 0.5f, gray);
+    drawText("Stick : bouger  B : courir  X : sac", 10, 188, 0.5f, gray);
     drawText(fromEditor ? "SELECT : éditeur    START : quitter"
                         : "SELECT : titre    START : quitter",
              10, 204, 0.5f, gray);
@@ -2267,15 +3348,9 @@ static void drawEditBottom(void) {
     int x, y;
     u32 grid = C2D_Color32(0, 0, 0, 60);
 
-    for (y = 0; y < VIEW_H; y++) {
-        for (x = 0; x < VIEW_W; x++) {
-            int tx = ecx + x, ty = ecy + y;
-            int t = map[ty][tx];
-            float sx = (float)(x * TS), sy = (float)(y * TS);
-            C2D_DrawRectSolid(sx, sy, 0.0f, TS, TS, TILES[t].color);
-            drawTileDetail(t, tx, ty, sx, sy);
-        }
-    }
+    for (y = 0; y < VIEW_H; y++)
+        for (x = 0; x < VIEW_W; x++)
+            drawTile(map[ecy + y][ecx + x], (float)(x * TS), (float)(y * TS), 0.0f, 1.0f);
 
     /* grille */
     for (x = 1; x < VIEW_W; x++)
@@ -2298,7 +3373,7 @@ static void drawEditTop(void) {
     const int OX = 10, OY = 10, OS = 5;   /* carte entiere : position et echelle */
     const char *help[] = {
         "Stylet : peindre",
-        "L / R : tuile",
+        "L / R : bloc",
         "B + stylet : gomme",
         "Y + stylet : départ",
         "Croix : défiler",
@@ -2310,7 +3385,8 @@ static void drawEditTop(void) {
     u32 white = COL(255, 255, 255);
     u32 gray = COL(170, 170, 190);
     u32 yellow = COL(255, 220, 80);
-    int i, tx, ty;
+    char buf[96];
+    int i, tx, ty, shown, first;
     float vx, vy, vw, vh;
 
     /* carte entiere */
@@ -2340,21 +3416,195 @@ static void drawEditTop(void) {
     for (i = 0; i < 9; i++)
         drawText(help[i], 268, 10.0f + i * 14, 0.4f, gray);
 
-    /* palette */
-    for (i = 0; i < T_COUNT; i++) {
-        float bx = 10.0f + i * 34;
-        float by = 172.0f;
-        if (i == editTile)
-            C2D_DrawRectSolid(bx - 3, by - 3, 0.0f, 34, 34, yellow);
-        C2D_DrawRectSolid(bx, by, 0.02f, 28, 28, TILES[i].color);
-        drawTileDetail(i, 0, 0, bx + 6, by + 6);
+    /* palette : 9 blocs visibles, le bloc choisi reste au milieu */
+    if (editTile >= tileCount)
+        editTile = 0;
+    shown = (tileCount < 9) ? tileCount : 9;
+    first = editTile - 4;
+    if (first > tileCount - shown)
+        first = tileCount - shown;
+    if (first < 0)
+        first = 0;
+    for (i = 0; i < shown; i++) {
+        int idx = first + i;
+        float bx = 10.0f + i * 36;
+        float by = 168.0f;
+        if (idx == editTile)
+            C2D_DrawRectSolid(bx - 3, by - 3, 0.0f, 38, 38, yellow);
+        C2D_DrawRectSolid(bx, by, 0.02f, 32, 32, COL(20, 20, 30));
+        drawTile(idx, bx, by, 0.1f, 2.0f);
     }
-    drawText(TILES[editTile].name, 288, 172, 0.5f, white);
-    drawText(TILES[editTile].solid ? "Bloque le joueur" : "Traversable",
-             288, 196, 0.4f, gray);
+    snprintf(buf, sizeof buf, "%s - %s%s   (%d/%d)", TILES[editTile].name,
+             TILES[editTile].solid ? "bloque" : "traversable",
+             TILES[editTile].tall ? ", rencontres" : "", editTile + 1, tileCount);
+    drawText(buf, 10, 208, 0.45f, white);
 
     if (editMsgTimer > 0)
-        drawText(editMsg, 10, 212, 0.5f, yellow);
+        drawText(editMsg, 10, 224, 0.5f, yellow);
+}
+
+/* ---------- Dessin : editeur de blocs ---------- */
+
+static void drawBlocksTop(void) {
+    const Tile *t = &tiles[blkSel];
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    u32 yellow = COL(255, 220, 80);
+    char buf[64];
+    int i, j;
+
+    /* grand apercu */
+    C2D_DrawRectSolid(8, 8, 0.0f, 100, 100, COL(35, 45, 80));
+    drawTile(blkSel, 10, 10, 0.3f, 6.0f);
+
+    /* le meme bloc repete 3 x 3 : pratique pour voir si la texture se raccorde bien */
+    C2D_DrawRectSolid(122, 10, 0.0f, 100, 100, COL(35, 45, 80));
+    for (j = 0; j < 3; j++)
+        for (i = 0; i < 3; i++)
+            drawTile(blkSel, 124.0f + i * 32, 12.0f + j * 32, 0.3f, 2.0f);
+
+    /* informations */
+    drawText(t->name, 232, 10, 0.6f, white);
+    snprintf(buf, sizeof buf, "Bloc %d / %d", blkSel + 1, tileCount);
+    drawText(buf, 232, 36, 0.45f, gray);
+    drawText(t->solid ? "Solide : oui" : "Solide : non", 232, 56, 0.45f,
+             t->solid ? yellow : gray);
+    drawText(t->tall ? "Rencontres : oui" : "Rencontres : non", 232, 72, 0.45f,
+             t->tall ? yellow : gray);
+
+    /* tous les blocs */
+    drawText("Tes blocs", 10, 116, 0.45f, gray);
+    for (i = 0; i < tileCount; i++) {
+        float x = 10.0f + (i % 16) * 23;
+        float y = 134.0f + (i / 16) * 26;
+        if (i == blkSel)
+            C2D_DrawRectSolid(x - 2, y - 2, 0.0f, 20, 20, yellow);
+        drawTile(i, x, y, 0.3f, 1.0f);
+    }
+
+    drawText("Stylet : dessiner     L / R : autre bloc", 10, 192, 0.42f, gray);
+    drawText("Y : réglage d'affichage (si les textures sont fausses)", 10, 207, 0.42f, gray);
+    drawText("SELECT : retour", 10, 222, 0.42f, gray);
+}
+
+static void drawBlocksBottom(void) {
+    const Tile *t = &tiles[blkSel];
+    u32 white = COL(255, 255, 255);
+    u32 yellow = COL(255, 220, 80);
+    u32 grid = C2D_Color32(0, 0, 0, 70);
+    Button b;
+    int i, x, y;
+
+    /* en-tete : choix du bloc et nom */
+    drawButton(&bkPrev, false);
+    drawButton(&bkNext, false);
+    b = bkName;
+    b.label = t->name;
+    drawButtonSc(&b, false, 0.55f);
+
+    /* zone de dessin : 16 x 16 pixels */
+    C2D_DrawRectSolid(BK_CX - 2, BK_CY - 2, 0.0f, 16 * BK_CELL + 4, 16 * BK_CELL + 4, white);
+    for (y = 0; y < 16; y++)
+        for (x = 0; x < 16; x++)
+            C2D_DrawRectSolid((float)(BK_CX + x * BK_CELL), (float)(BK_CY + y * BK_CELL),
+                              0.05f, BK_CELL, BK_CELL, palCol(t->pix[y][x]));
+    for (i = 1; i < 16; i++) {
+        C2D_DrawRectSolid((float)(BK_CX + i * BK_CELL), BK_CY, 0.1f, 1, 16 * BK_CELL, grid);
+        C2D_DrawRectSolid(BK_CX, (float)(BK_CY + i * BK_CELL), 0.1f, 16 * BK_CELL, 1, grid);
+    }
+
+    /* palette de couleurs */
+    for (i = 0; i < 32; i++) {
+        float px = (float)(BK_PX + (i % 8) * BK_PITCH);
+        float py = (float)(BK_PY + (i / 8) * BK_PITCH);
+        if (i == blkColor)
+            C2D_DrawRectSolid(px - 2, py - 2, 0.0f, 20, 20, yellow);
+        C2D_DrawRectSolid(px, py, 0.05f, 16, 16, palCol(i));
+    }
+
+    /* outils */
+    for (i = 0; i < 3; i++)
+        drawButtonSc(&bkTools[i], blkTool == i, 0.38f);
+
+    /* proprietes du bloc */
+    b = bkSolid;
+    b.label = t->solid ? "Solide : oui" : "Solide : non";
+    drawButtonSc(&b, t->solid, 0.5f);
+    b = bkTall;
+    b.label = t->tall ? "Rencontres : oui" : "Rencontres : non";
+    drawButtonSc(&b, t->tall, 0.5f);
+
+    /* boutons du bas */
+    b = bkNew;
+    b.enabled = (tileCount < MAX_TILES);
+    drawButtonSc(&b, false, 0.5f);
+    b = bkCopy;
+    b.enabled = (tileCount < MAX_TILES);
+    drawButtonSc(&b, false, 0.5f);
+    b = bkDel;
+    b.enabled = (tileCount > 1);
+    b.label = (blkDelTimer > 0) ? "Sûr ?" : "Suppr.";
+    drawButtonSc(&b, blkDelTimer > 0, 0.5f);
+    drawButtonSc(&bkBack, false, 0.5f);
+}
+
+/* ---------- Dessin : reglage d'affichage ---------- */
+
+static void drawCalibTop(void) {
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+
+    drawTextCX("Réglage d'affichage des textures", TOP_W / 2, 6, 0.6f, white);
+
+    C2D_DrawRectSolid(16, 36, 0.0f, 136, 136, COL(70, 70, 85));
+    drawSlot(TEST_SLOT, 20, 40, 0.3f, 8.0f);
+
+    drawText("Résultat attendu :", 170, 40, 0.45f, white);
+    drawText("ROUGE en haut à gauche", 170, 60, 0.42f, gray);
+    drawText("VERT en haut à droite", 170, 74, 0.42f, gray);
+    drawText("BLEU en bas à gauche", 170, 88, 0.42f, gray);
+    drawText("JAUNE en bas à droite", 170, 102, 0.42f, gray);
+    drawText("et une barre NOIRE au bord", 170, 122, 0.42f, gray);
+    drawText("GAUCHE de chaque carré.", 170, 136, 0.42f, gray);
+
+    drawText("Si ce n'est pas le cas, touche les boutons", 10, 186, 0.42f, gray);
+    drawText("du bas jusqu'à ce que ça le soit, puis", 10, 200, 0.42f, gray);
+    drawText("touche « Terminé ». Tout est réglé pour de bon.", 10, 214, 0.42f, gray);
+}
+
+static void drawCalibBottom(void) {
+    static const char *const names[3] = { "Haut / bas", "Couleurs", "Carrés de 8 x 8" };
+    Button b;
+    char buf[48];
+    int i;
+
+    drawTextCX("Touche un bouton pour le changer", BOT_W / 2, 14, 0.5f, COL(200, 210, 255));
+
+    for (i = 0; i < 3; i++) {
+        int v = (i == 0) ? texFlipV : (i == 1 ? texBswap : texSwapXY);
+        b = caBtn[i];
+        snprintf(buf, sizeof buf, "%s : %s", names[i], v ? "inversé" : "normal");
+        b.label = buf;
+        drawButtonSc(&b, v != 0, 0.55f);
+    }
+    drawButton(&caOk, false);
+}
+
+/* ---------- Dessin : jeu ---------- */
+
+static void drawMapTop(void) {
+    int tx0 = camX / TS;
+    int ty0 = camY / TS;
+    int tx1 = (camX + TOP_W - 1) / TS;
+    int ty1 = (camY + TOP_H - 1) / TS;
+    int tx, ty;
+
+    if (tx1 >= MAP_W) tx1 = MAP_W - 1;
+    if (ty1 >= MAP_H) ty1 = MAP_H - 1;
+
+    for (ty = ty0; ty <= ty1; ty++)
+        for (tx = tx0; tx <= tx1; tx++)
+            drawTile(map[ty][tx], (float)(tx * TS - camX), (float)(ty * TS - camY), 0.0f, 1.0f);
 }
 
 /* ---------- Dessin : editeur de monstres ---------- */
@@ -2441,6 +3691,11 @@ static void drawMonstersTop(void) {
     drawText(buf, 152, 38, 0.5f, yellow);
     snprintf(buf, sizeof buf, "%s - %s", SHAPE_NAMES[m->shape], COLOR_NAMES[m->color]);
     drawText(buf, 152, 54, 0.4f, gray);
+    if (m->drop >= 0 && m->drop < itemCount)
+        snprintf(buf, sizeof buf, "Butin : %s (%d %%)", items[m->drop].name, m->rate);
+    else
+        snprintf(buf, sizeof buf, "Butin : aucun");
+    drawText(buf, 152, 64, 0.4f, gray);
 
     /* barres de stats (au niveau du monstre) */
     for (i = 0; i < ST_COUNT; i++) {
@@ -2574,13 +3829,70 @@ static void drawHeroTop(void) {
         drawText(buf, 328, y - 2, 0.45f, white);
     }
 
-    drawText("Attaques", 10, 144, 0.5f, yellow);
-    drawAttackList(c, 10, 164);
-    drawText("Changer la classe ou le niveau remet l'XP à zéro", 10, 222, 0.4f, gray);
+    snprintf(buf, sizeof buf, "Arme : %s    Armure : %s",
+             hero.weapon >= 0 ? items[hero.weapon].name : "aucune",
+             hero.armor >= 0 ? items[hero.armor].name : "aucune");
+    drawText(buf, 10, 135, 0.42f, gray);
+
+    drawText("Attaques", 10, 149, 0.45f, yellow);
+    drawAttackList(c, 10, 165);
+    drawText("Changer la classe ou le niveau remet l'XP à zéro", 10, 227, 0.38f, gray);
+}
+
+/* resume court des bonus d'un objet : "PV+5 DEF+2" */
+static void itemSummary(const Item *it, char *buf, size_t n) {
+    static const char *const tag[ST_COUNT] = { "PV", "ATK", "DEF", "VIT" };
+    size_t len = 0;
+    int s;
+
+    buf[0] = '\0';
+    if (it->kind == IK_POTION) {
+        snprintf(buf, n, "Soigne %d PV", it->bonus[ST_HP]);
+        return;
+    }
+    for (s = 0; s < ST_COUNT; s++) {
+        if (it->bonus[s] > 0 && len < n - 12)
+            len += (size_t)snprintf(buf + len, n - len, "%s%s+%d", len > 0 ? " " : "",
+                                    tag[s], it->bonus[s]);
+    }
+    if (len == 0)
+        snprintf(buf, n, "Aucun bonus");
+}
+
+static void drawItemsTop(void) {
+    const Item *it = &items[formIdx[FM_ITEMS]];
+    const int caps[ST_COUNT] = { 100, 25, 25, 25 };
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    u32 yellow = COL(255, 220, 80);
+    char buf[64];
+    int s, row = 0;
+
+    drawText(it->name, 10, 8, 0.8f, white);
+    drawText(ITEM_KIND_NAMES[it->kind], 10, 40, 0.55f, yellow);
+
+    for (s = 0; s < ST_COUNT; s++) {
+        float y = 76.0f + row * 22;
+
+        if (it->kind == IK_POTION && s != ST_HP)
+            continue;
+        drawText(it->kind == IK_POTION ? "PV rendus" : STAT_LABELS[s], 10, y - 2, 0.5f, white);
+        drawBar(110, y, 200, 13, it->bonus[s], caps[s], statColor(s));
+        snprintf(buf, sizeof buf, "+%d", it->bonus[s]);
+        drawText(buf, 320, y - 2, 0.5f, white);
+        row++;
+    }
+
+    snprintf(buf, sizeof buf, "Niveau requis : %d", it->req);
+    drawText(buf, 10, 176, 0.5f, it->req > hero.level ? COL(230, 100, 100) : gray);
+    snprintf(buf, sizeof buf, "Possédés : %d", hero.inv[formIdx[FM_ITEMS]]);
+    drawText(buf, 10, 194, 0.5f, gray);
+    drawText("L / R : objet précédent / suivant", 10, 222, 0.4f, gray);
 }
 
 static void drawFormTop(void) {
     switch (formKind) {
+    case FM_ITEMS:    drawItemsTop(); break;
     case FM_MONSTERS: drawMonstersTop(); break;
     case FM_CLASSES:  drawClassesTop(); break;
     case FM_ATTACKS:  drawAttacksTop(); break;
@@ -2664,10 +3976,12 @@ static void drawFormBottom(void) {
 
 static void drawEdMenuTop(void) {
     static const char *const desc[N_ED_BUTTONS] = {
-        "Dessine la carte au stylet : herbe, murs, hautes herbes...",
-        "Crée et modifie les monstres : stats, forme, niveau, classe.",
+        "Dessine la carte au stylet avec tes blocs.",
+        "Crée des blocs et dessine leurs textures pixel par pixel.",
+        "Crée et modifie les monstres : stats, forme, classe, butin.",
         "Crée des classes : stats de départ, gain par niveau, 4 attaques.",
         "Crée des attaques : dégâts ou soin, puissance, précision.",
+        "Crée des armes, armures et potions : bonus, niveau requis.",
         "Choisis la classe et le niveau de ton héros.",
         "Retour à l'écran titre.",
     };
@@ -2676,9 +3990,10 @@ static void drawEdMenuTop(void) {
     drawTextCX("Éditeurs", TOP_W / 2, 30, 1.3f, COL(255, 255, 255));
     drawTextCX(desc[edSel], TOP_W / 2, 110, 0.5f, COL(200, 210, 255));
 
-    snprintf(buf, sizeof buf, "%d monstres - %d classes - %d attaques",
-             monsterCount, classCount, attackCount);
+    snprintf(buf, sizeof buf, "%d monstres - %d classes - %d attaques - %d objets",
+             monsterCount, classCount, attackCount, itemCount);
     drawTextCX(buf, TOP_W / 2, 150, 0.45f, COL(150, 160, 190));
+    drawTextCX("Y : réglage d'affichage des textures", TOP_W / 2, 200, 0.42f, COL(120, 130, 160));
 }
 
 static void drawEdMenuBottom(void) {
@@ -2776,6 +4091,159 @@ static void drawBattleBottom(void) {
         drawText(info, b->x + 8, b->y + 27, 0.4f, COL(215, 220, 240));
     }
     drawButton(&batFlee, false);
+
+    {
+        Button pb = batPotion;
+        char pl[24];
+
+        snprintf(pl, sizeof pl, "Potion x%d", potionCount());
+        pb.label = pl;
+        pb.enabled = (potionCount() > 0 && bt.pHp < bt.pMax);
+        drawButton(&pb, false);
+    }
+}
+
+/* ---------- Dessin : inventaire ---------- */
+
+/* stats du heros si on equipait (ou retirait) l'objet idx */
+static int previewStat(int s, int idx) {
+    int w = hero.weapon, a = hero.armor;
+
+    if (idx >= 0 && items[idx].kind == IK_WEAPON)
+        w = (w == idx) ? -1 : idx;
+    else if (idx >= 0 && items[idx].kind == IK_ARMOR)
+        a = (a == idx) ? -1 : idx;
+    return heroStatEq(s, w, a);
+}
+
+static void drawInvTop(void) {
+    int idx = (invN > 0) ? invList[invSel] : -1;
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    u32 yellow = COL(255, 220, 80);
+    char buf[96];
+    int s, maxHp = heroStat(ST_HP);
+
+    drawText("Inventaire", 10, 6, 0.8f, white);
+    snprintf(buf, sizeof buf, "%s niv. %d", classes[hero.cls].name, hero.level);
+    drawText(buf, 10, 36, 0.5f, yellow);
+    drawBar(10, 56, 190, 10, hero.hp, maxHp, COL(80, 200, 90));
+    snprintf(buf, sizeof buf, "PV %d / %d", hero.hp, maxHp);
+    drawText(buf, 10, 67, 0.4f, gray);
+
+    snprintf(buf, sizeof buf, "Arme : %s", hero.weapon >= 0 ? items[hero.weapon].name : "aucune");
+    drawText(buf, 10, 88, 0.45f, white);
+    snprintf(buf, sizeof buf, "Armure : %s", hero.armor >= 0 ? items[hero.armor].name : "aucune");
+    drawText(buf, 10, 104, 0.45f, white);
+
+    /* stats, avec l'effet de l'objet choisi */
+    for (s = 0; s < ST_COUNT; s++) {
+        float y = 130.0f + s * 18;
+        int cur = heroStat(s);
+        int pre = previewStat(s, idx);
+
+        drawText(STAT_LABELS[s], 10, y, 0.48f, statColor(s));
+        snprintf(buf, sizeof buf, "%d", cur);
+        drawText(buf, 80, y, 0.48f, white);
+        if (idx >= 0 && items[idx].kind != IK_POTION && pre != cur) {
+            snprintf(buf, sizeof buf, "-> %d (%+d)", pre, pre - cur);
+            drawText(buf, 112, y, 0.48f, pre > cur ? COL(110, 220, 120) : COL(230, 100, 100));
+        }
+    }
+
+    /* fiche de l'objet choisi */
+    C2D_DrawRectSolid(214, 8, 0.0f, 180, 168, COL(30, 38, 70));
+    if (idx >= 0) {
+        const Item *it = &items[idx];
+        float y = 66;
+
+        drawText(it->name, 222, 14, 0.55f, white);
+        drawText(ITEM_KIND_NAMES[it->kind], 222, 36, 0.42f, yellow);
+        if (it->kind == IK_POTION) {
+            snprintf(buf, sizeof buf, "Rend %d PV", it->bonus[ST_HP]);
+            drawText(buf, 222, y, 0.45f, white);
+        } else {
+            for (s = 0; s < ST_COUNT; s++) {
+                if (it->bonus[s] > 0) {
+                    snprintf(buf, sizeof buf, "%s +%d", STAT_LABELS[s], it->bonus[s]);
+                    drawText(buf, 222, y, 0.45f, statColor(s));
+                    y += 16;
+                }
+            }
+            snprintf(buf, sizeof buf, "Niveau requis : %d", it->req);
+            drawText(buf, 222, 144, 0.42f, hero.level < it->req ? COL(230, 100, 100) : gray);
+        }
+        snprintf(buf, sizeof buf, "Possédés : %d", hero.inv[idx]);
+        drawText(buf, 222, 158, 0.42f, gray);
+    } else {
+        drawText("Ton sac est vide.", 222, 14, 0.45f, gray);
+        drawText("Bats des monstres", 222, 40, 0.42f, gray);
+        drawText("pour trouver du butin !", 222, 54, 0.42f, gray);
+    }
+
+    if (invMsgTimer > 0) {
+        C2D_DrawRectSolid(0, 204, 0.4f, TOP_W, 28, C2D_Color32(0, 0, 0, 170));
+        drawTextCX(invMsg, TOP_W / 2, 209, 0.6f, yellow);
+    }
+}
+
+static void drawInvBottom(void) {
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    char buf[64];
+    int r;
+    Button b;
+
+    drawText("Sac", 10, 6, 0.6f, white);
+    snprintf(buf, sizeof buf, "%d type(s) d'objets", invN);
+    drawText(buf, 80, 10, 0.4f, gray);
+
+    for (r = 0; r < INV_ROWS; r++) {
+        int li = invScroll + r;
+        Button row = invRow(r);
+
+        if (li >= invN)
+            break;
+        {
+            int idx = invList[li];
+            const Item *it = &items[idx];
+            bool eq = (hero.weapon == idx || hero.armor == idx);
+            bool chosen = (li == invSel);
+
+            C2D_DrawRectSolid(row.x - (chosen ? 2 : 0), row.y - (chosen ? 2 : 0), 0.0f,
+                              row.w + (chosen ? 4 : 0), row.h + (chosen ? 4 : 0),
+                              chosen ? COL(255, 220, 80) : COL(20, 20, 30));
+            C2D_DrawRectSolid(row.x, row.y, 0.1f, row.w, row.h,
+                              it->kind == IK_POTION ? COL(50, 100, 80) : COL(55, 70, 130));
+            if (eq) {
+                C2D_DrawRectSolid(row.x + 4, row.y + 5, 0.15f, 14, 14, COL(255, 220, 80));
+                drawText("E", row.x + 8, row.y + 5, 0.45f, COL(20, 20, 30));
+            }
+            drawText(it->name, row.x + 24, row.y + 4, 0.5f, white);
+            itemSummary(it, buf, sizeof buf);
+            drawText(buf, row.x + 128, row.y + 7, 0.36f, COL(215, 220, 240));
+            snprintf(buf, sizeof buf, "x%d", hero.inv[idx]);
+            drawText(buf, row.x + 246, row.y + 4, 0.5f, white);
+        }
+    }
+
+    b = invUp;   b.enabled = (invScroll > 0);                 drawButton(&b, false);
+    b = invDown; b.enabled = (invScroll + INV_ROWS < invN);   drawButton(&b, false);
+
+    b = invAct;
+    if (invN == 0) {
+        b.enabled = false;
+    } else {
+        int idx = invList[invSel];
+        if (items[idx].kind == IK_POTION)
+            b.label = "Utiliser";
+        else if (hero.weapon == idx || hero.armor == idx)
+            b.label = "Retirer";
+        else
+            b.label = "Équiper";
+    }
+    drawButton(&b, false);
+    drawButton(&invBack, false);
 }
 
 /* ---------- Programme principal ---------- */
@@ -2797,6 +4265,10 @@ int main(int argc, char **argv) {
 
     initTiles();
     buildMap();
+    loadDisplay();
+    loadTiles();
+    mapClampTiles();
+    atlasInit();
     loadAll();
 
     while (running && aptMainLoop()) {
@@ -2813,6 +4285,11 @@ int main(int argc, char **argv) {
                 saveMap();
             else if (state == S_FORM)
                 saveAll();
+            else if (state == S_BLOCKS) {
+                saveTiles();
+                saveMap();
+            } else if (state == S_CALIB)
+                saveDisplay();
             break;
         }
 
@@ -2826,8 +4303,19 @@ int main(int argc, char **argv) {
             updateEdMenu(kDown);
         else if (state == S_BATTLE)
             updateBattle(kDown);
+        else if (state == S_INV)
+            updateInventory(kDown);
+        else if (state == S_BLOCKS)
+            updateBlocks(kDown, kHeld);
+        else if (state == S_CALIB)
+            updateCalib(kDown);
         else
             updateEdit(kDown, kHeld);
+
+        if (atlasDirty) {
+            atlasFlush();
+            atlasDirty = false;
+        }
 
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C2D_TextBufClear(g_textBuf);
@@ -2875,6 +4363,30 @@ int main(int argc, char **argv) {
             C2D_TargetClear(bot, COL(30, 30, 40));
             C2D_SceneBegin(bot);
             drawBattleBottom();
+        } else if (state == S_INV) {
+            C2D_TargetClear(top, COL(18, 24, 48));
+            C2D_SceneBegin(top);
+            drawInvTop();
+
+            C2D_TargetClear(bot, COL(30, 30, 40));
+            C2D_SceneBegin(bot);
+            drawInvBottom();
+        } else if (state == S_BLOCKS) {
+            C2D_TargetClear(top, COL(18, 24, 48));
+            C2D_SceneBegin(top);
+            drawBlocksTop();
+
+            C2D_TargetClear(bot, COL(30, 30, 40));
+            C2D_SceneBegin(bot);
+            drawBlocksBottom();
+        } else if (state == S_CALIB) {
+            C2D_TargetClear(top, COL(18, 24, 48));
+            C2D_SceneBegin(top);
+            drawCalibTop();
+
+            C2D_TargetClear(bot, COL(30, 30, 40));
+            C2D_SceneBegin(bot);
+            drawCalibBottom();
         } else {
             C2D_TargetClear(top, COL(18, 24, 48));
             C2D_SceneBegin(top);
