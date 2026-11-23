@@ -1,14 +1,15 @@
 /*
- * RPG 2DS - Etape 6 : inventaire, armes et armures
+ * RPG 2DS - Etape 7 : blocs personnalises, zones et teleporteurs
  *
  *  - Ecran titre : Jouer / Editeurs / Quitter
- *  - Menu Editeurs : Carte, Blocs, Monstres, Classes, Attaques, Objets, Heros
- *  - Editeur de blocs : cree des blocs et dessine leurs textures (16 x 16, 32 couleurs)
+ *  - Menu Editeurs : Carte, Monstres, Classes, Attaques, Objets, Heros
  *  - En jeu : X (ou bouton Sac) ouvre l'inventaire ; les monstres laissent du butin
  *  - Dans les hautes herbes, des monstres sauvages apparaissent : contact = combat
  *  - Jeu : carte vue de dessus, deplacement (croix/stick, B = courir)
  *  - Editeur : ecran du bas = zone de dessin (stylet), ecran du haut = carte entiere
- *  - La carte est sauvegardee sur la carte SD : sdmc:/3ds/rpg2ds/map1.bin
+ *  - Editeur de blocs : on redessine les textures et on cree ses propres blocs
+ *  - Plusieurs zones (map1.bin, map2.bin...), agrandissables ; teleporteurs invisibles en jeu
+ *  - Les zones sont sauvegardees sur la carte SD : sdmc:/3ds/rpg2ds/mapN.bin
  *  - Les donnees sont sauvegardees dans :       sdmc:/3ds/rpg2ds/ (plusieurs .bin)
  *
  * Compilation : devkitARM + libctru + citro2d (voir Makefile)
@@ -30,9 +31,6 @@
 #define BOT_H 240
 
 #define TS    16   /* taille d'une tuile en pixels */
-#define MAP_W 50
-#define MAP_H 30
-
 #define VIEW_W (BOT_W / TS)   /* tuiles visibles dans l'editeur : 20 */
 #define VIEW_H (BOT_H / TS)   /* 15 */
 
@@ -66,109 +64,92 @@
 #define CLS_REC      (NAME_BYTES + 20)
 #define MAX_LEVEL    50
 
-/* ---------- Tuiles (blocs) ---------- */
+/* ---------- Blocs (tuiles), palette et textures ---------- */
 
-#define MAX_TILES    32
-#define TILE_NAME    32
-#define ATLAS_W      128
-#define ATLAS_H      128
-#define ATLAS_SLOTS  64
-#define TEST_SLOT    32
-#define TILES_FILE   "sdmc:/3ds/rpg2ds/tiles.bin"
-#define DISPLAY_FILE "sdmc:/3ds/rpg2ds/display.bin"
+#define PAL_N         32
+#define MAX_TILES     32
+#define BASE_TILES    8      /* blocs d'origine : on peut les redessiner mais pas les supprimer */
+#define MAX_RUNS      256    /* rectangles de detail par bloc (maximum possible : 16 x 16) */
+#define DETAIL_BUDGET 6000   /* rectangles de detail dessines au maximum par image */
+#define TILE_FILE     "sdmc:/3ds/rpg2ds/tiles.bin"
+#define TILE_REC      (NAME_BYTES + 2 + TS * TS)
 
-/* palette fixe de 32 couleurs pour dessiner les textures */
-static const u8 PAL[32][3] = {
-    { 20, 20, 30 },    { 60, 60, 75 },    { 120, 120, 130 }, { 190, 190, 200 }, { 250, 250, 250 },
-    { 120, 30, 30 },   { 220, 60, 60 },   { 250, 140, 130 }, { 140, 70, 20 },   { 200, 120, 50 },
-    { 250, 170, 60 },  { 250, 220, 90 },  { 30, 100, 40 },   { 76, 160, 64 },   { 130, 210, 90 },
-    { 55, 130, 48 },   { 30, 60, 130 },   { 50, 110, 200 },  { 110, 170, 240 }, { 60, 190, 190 },
-    { 80, 30, 120 },   { 150, 80, 200 },  { 240, 130, 190 }, { 200, 170, 110 }, { 170, 130, 90 },
-    { 110, 70, 30 },   { 80, 45, 15 },    { 80, 80, 90 },    { 50, 150, 60 },   { 235, 235, 240 },
-    { 140, 90, 50 },   { 0, 0, 0 },
+enum { T_GRASS, T_WALL, T_WATER, T_TREE, T_PATH, T_FLOOR, T_DOOR, T_TALL };
+
+enum {
+    P_BLACK, P_DGRAY, P_GRAY, P_LGRAY, P_WHITE,
+    P_DGREEN, P_GREEN, P_GRASS, P_LGREEN, P_PGREEN,
+    P_DBLUE, P_BLUE, P_LBLUE, P_PBLUE,
+    P_DBROWN, P_BROWN, P_FLOOR, P_SAND, P_PSAND, P_VDBROWN,
+    P_DRED, P_RED, P_SALMON, P_ORANGE, P_YELLOW, P_PYELLOW,
+    P_PURPLE, P_LPURPLE, P_PINK, P_TEAL, P_LTEAL, P_SKIN
 };
 
-static u32 palCol(int i) {
-    return COL(PAL[i & 31][0], PAL[i & 31][1], PAL[i & 31][2]);
-}
+static const u8 PAL_RGB[PAL_N][3] = {
+    {   0,   0,   0 }, {  60,  60,  70 }, { 120, 120, 130 }, { 180, 180, 190 }, { 255, 255, 255 },
+    {  30, 100,  40 }, {  52, 135,  52 }, {  76, 160,  64 }, { 110, 190,  90 }, { 170, 220, 120 },
+    {  30,  70, 140 }, {  50, 110, 200 }, {  90, 160, 230 }, { 170, 210, 250 },
+    { 110,  70,  30 }, { 140,  95,  50 }, { 170, 130,  90 }, { 200, 170, 110 }, { 225, 205, 150 },
+    {  90,  50,  20 },
+    { 150,  30,  30 }, { 220,  60,  60 }, { 240, 140, 120 }, { 230, 120,  40 }, { 250, 200,  60 },
+    { 255, 235, 150 },
+    { 110,  50, 150 }, { 170, 100, 210 }, { 230, 120, 190 }, {  20, 130, 130 }, {  80, 200, 190 },
+    { 240, 200, 160 },
+};
 
-/* les blocs de depart (leurs numeros servent aussi a la carte par defaut) */
-enum { T_GRASS, T_WALL, T_WATER, T_TREE, T_PATH, T_FLOOR, T_DOOR, T_TALL, T_COUNT };
+static u32 palCol[PAL_N];
 
-#define TILE_MAXRECT 256
-
-typedef struct { u8 x, y, w, h, c; } PRect;
+/* un rectangle de couleur uni dans un bloc (dessin rapide) */
+typedef struct { u8 x, y, w, h, c; } Run;
 
 typedef struct {
-    char name[TILE_NAME];
-    bool solid;       /* bloque le joueur */
-    bool tall;        /* hautes herbes : les monstres sauvages y apparaissent */
-    u32 color;        /* couleur moyenne (mini-cartes) */
-    u8 pix[16][16];   /* la texture : numeros de couleurs de la palette */
-    u8 base;          /* couleur la plus frequente (fond) */
-    u16 nrect;        /* nombre de rectangles a dessiner par-dessus le fond */
-    PRect r[TILE_MAXRECT];
+    char name[NAME_BYTES];
+    bool solid;        /* bloque le joueur */
+    bool wild;         /* des monstres sauvages y apparaissent */
+    u8 px[TS][TS];     /* texture : numeros de couleur de la palette */
+    u8 base;           /* couleur dominante (fond du bloc, couleur des mini-cartes) */
+    int nRuns;
+    Run runs[MAX_RUNS];
 } Tile;
 
 static Tile tiles[MAX_TILES];
-static int tileCount = 0;
-#define TILES tiles
+static int tileCount = BASE_TILES;
+static int rectBudget = DETAIL_BUDGET;   /* se remet a zero a chaque image */
 
-static u8 map[MAP_H][MAP_W];
-static int spawnTX = 12, spawnTY = 13;   /* point de depart (en tuiles) */
+/* transforme la texture en une couleur de fond + quelques rectangles */
+static void compileTile(Tile *t) {
+    static bool used[TS][TS];
+    int cnt[PAL_N];
+    int x, y, i, best = 0;
 
-static void tileFill(Tile *t, int c) {
-    memset(t->pix, c, sizeof t->pix);
-}
-
-static void tileRect(Tile *t, int x, int y, int w, int h, int c) {
-    int xx, yy;
-    for (yy = y; yy < y + h; yy++)
-        for (xx = x; xx < x + w; xx++)
-            if (xx >= 0 && xx < 16 && yy >= 0 && yy < 16)
-                t->pix[yy][xx] = (u8)c;
-}
-
-/* recalcule tout ce qui depend des pixels : couleur moyenne et rectangles de dessin */
-static void tileRecolor(Tile *t) {
-    int x, y, r = 0, g = 0, b = 0, best = 0;
-    int hist[32];
-    bool used[16][16];
-
-    memset(hist, 0, sizeof hist);
-    for (y = 0; y < 16; y++) {
-        for (x = 0; x < 16; x++) {
-            const u8 *p = PAL[t->pix[y][x] & 31];
-            r += p[0];
-            g += p[1];
-            b += p[2];
-            hist[t->pix[y][x] & 31]++;
+    memset(cnt, 0, sizeof cnt);
+    for (y = 0; y < TS; y++) {
+        for (x = 0; x < TS; x++) {
+            if (t->px[y][x] >= PAL_N)
+                t->px[y][x] = P_BLACK;
+            cnt[t->px[y][x]]++;
         }
     }
-    t->color = COL(r / 256, g / 256, b / 256);
-
-    /* fond = couleur la plus frequente ; le reste est decoupe en rectangles */
-    for (x = 1; x < 32; x++)
-        if (hist[x] > hist[best])
-            best = x;
+    for (i = 1; i < PAL_N; i++)
+        if (cnt[i] > cnt[best])
+            best = i;
     t->base = (u8)best;
-    t->nrect = 0;
-    memset(used, 0, sizeof used);
-    for (y = 0; y < 16; y++) {
-        for (x = 0; x < 16; x++) {
-            int c, w, h, xx, yy;
 
-            if (used[y][x] || (t->pix[y][x] & 31) == best)
+    memset(used, 0, sizeof used);
+    t->nRuns = 0;
+    for (y = 0; y < TS; y++) {
+        for (x = 0; x < TS; x++) {
+            int c = t->px[y][x], w = 1, h = 1, xx, yy;
+            Run *r;
+
+            if (c == best || used[y][x])
                 continue;
-            c = t->pix[y][x] & 31;
-            w = 1;
-            while (x + w < 16 && !used[y][x + w] && (t->pix[y][x + w] & 31) == c)
+            while (x + w < TS && t->px[y][x + w] == c && !used[y][x + w])
                 w++;
-            h = 1;
             for (;;) {
-                bool ok = (y + h < 16);
+                bool ok = (y + h < TS);
                 for (xx = x; ok && xx < x + w; xx++)
-                    if (used[y + h][xx] || (t->pix[y + h][xx] & 31) != c)
+                    if (t->px[y + h][xx] != c || used[y + h][xx])
                         ok = false;
                 if (!ok)
                     break;
@@ -177,300 +158,162 @@ static void tileRecolor(Tile *t) {
             for (yy = y; yy < y + h; yy++)
                 for (xx = x; xx < x + w; xx++)
                     used[yy][xx] = true;
-            t->r[t->nrect].x = (u8)x;
-            t->r[t->nrect].y = (u8)y;
-            t->r[t->nrect].w = (u8)w;
-            t->r[t->nrect].h = (u8)h;
-            t->r[t->nrect].c = (u8)c;
-            t->nrect++;
+            r = &t->runs[t->nRuns++];
+            r->x = (u8)x; r->y = (u8)y; r->w = (u8)w; r->h = (u8)h; r->c = (u8)c;
         }
     }
 }
 
-static void tileSet(Tile *t, const char *name, bool solid, bool tall, int base) {
+static void pxFill(Tile *t, int c) {
+    memset(t->px, c, sizeof t->px);
+}
+
+static void pxRect(Tile *t, int x, int y, int w, int h, int c) {
+    int xx, yy;
+    for (yy = y; yy < y + h; yy++)
+        for (xx = x; xx < x + w; xx++)
+            if (xx >= 0 && xx < TS && yy >= 0 && yy < TS)
+                t->px[yy][xx] = (u8)c;
+}
+
+/* texture d'origine d'un des 8 premiers blocs */
+static void defaultTile(int id) {
+    static const char *const NAMES[BASE_TILES] = {
+        "Herbe", "Mur", "Eau", "Arbre", "Chemin", "Sol", "Porte", "Hautes herbes"
+    };
+    Tile *t = &tiles[id];
+
     memset(t, 0, sizeof *t);
-    snprintf(t->name, TILE_NAME, "%s", name);
-    t->solid = solid;
-    t->tall = tall;
-    tileFill(t, base);
+    snprintf(t->name, NAME_BYTES, "%s", NAMES[id]);
+    t->solid = (id == T_WALL || id == T_WATER || id == T_TREE);
+    t->wild = (id == T_TALL);
+
+    switch (id) {
+    case T_GRASS:
+        pxFill(t, P_GRASS);
+        pxRect(t, 5, 7, 2, 2, P_GREEN);
+        pxRect(t, 11, 3, 1, 1, P_GREEN);
+        pxRect(t, 2, 12, 1, 1, P_LGREEN);
+        pxRect(t, 13, 13, 2, 1, P_GREEN);
+        pxRect(t, 9, 10, 1, 1, P_LGREEN);
+        break;
+    case T_WALL:
+        pxFill(t, P_GRAY);
+        pxRect(t, 0, 7, 16, 1, P_DGRAY);
+        pxRect(t, 0, 15, 16, 1, P_DGRAY);
+        pxRect(t, 8, 0, 1, 7, P_DGRAY);
+        pxRect(t, 4, 8, 1, 7, P_DGRAY);
+        pxRect(t, 12, 8, 1, 7, P_DGRAY);
+        pxRect(t, 0, 0, 8, 1, P_LGRAY);
+        pxRect(t, 9, 0, 7, 1, P_LGRAY);
+        break;
+    case T_WATER:
+        pxFill(t, P_BLUE);
+        pxRect(t, 3, 6, 10, 2, P_LBLUE);
+        pxRect(t, 1, 12, 5, 1, P_LBLUE);
+        pxRect(t, 10, 2, 5, 1, P_LBLUE);
+        break;
+    case T_TREE:
+        pxFill(t, P_DGREEN);
+        pxRect(t, 3, 2, 10, 8, P_GRASS);
+        pxRect(t, 4, 1, 8, 10, P_GRASS);
+        pxRect(t, 5, 3, 3, 2, P_LGREEN);
+        pxRect(t, 6, 10, 4, 6, P_DBROWN);
+        break;
+    case T_PATH:
+        pxFill(t, P_SAND);
+        pxRect(t, 3, 4, 1, 1, P_FLOOR);
+        pxRect(t, 10, 2, 1, 1, P_FLOOR);
+        pxRect(t, 7, 9, 1, 1, P_FLOOR);
+        pxRect(t, 13, 12, 1, 1, P_FLOOR);
+        pxRect(t, 2, 13, 1, 1, P_FLOOR);
+        pxRect(t, 5, 6, 2, 1, P_PSAND);
+        pxRect(t, 11, 8, 2, 1, P_PSAND);
+        break;
+    case T_FLOOR:
+        pxFill(t, P_FLOOR);
+        pxRect(t, 0, 3, 16, 1, P_BROWN);
+        pxRect(t, 0, 7, 16, 1, P_BROWN);
+        pxRect(t, 0, 11, 16, 1, P_BROWN);
+        pxRect(t, 0, 15, 16, 1, P_BROWN);
+        pxRect(t, 4, 0, 1, 3, P_BROWN);
+        pxRect(t, 11, 4, 1, 3, P_BROWN);
+        pxRect(t, 6, 8, 1, 3, P_BROWN);
+        pxRect(t, 13, 12, 1, 3, P_BROWN);
+        break;
+    case T_DOOR:
+        pxFill(t, P_DBROWN);
+        pxRect(t, 3, 0, 10, 16, P_VDBROWN);
+        pxRect(t, 5, 2, 6, 5, P_DBROWN);
+        pxRect(t, 5, 9, 6, 5, P_DBROWN);
+        pxRect(t, 10, 7, 2, 2, P_YELLOW);
+        break;
+    default: /* T_TALL */
+        pxFill(t, P_GREEN);
+        pxRect(t, 2, 6, 2, 9, P_LGREEN);
+        pxRect(t, 7, 2, 2, 12, P_LGREEN);
+        pxRect(t, 12, 7, 2, 8, P_LGREEN);
+        pxRect(t, 2, 6, 2, 2, P_PGREEN);
+        pxRect(t, 7, 2, 2, 2, P_PGREEN);
+        pxRect(t, 12, 7, 2, 2, P_PGREEN);
+        pxRect(t, 1, 14, 14, 2, P_DGREEN);
+        break;
+    }
+    compileTile(t);
 }
 
 static void initTiles(void) {
-    Tile *t;
     int i;
 
-    t = &tiles[T_GRASS];
-    tileSet(t, "Herbe", false, false, 13);
-    tileRect(t, 3, 4, 2, 2, 15);
-    tileRect(t, 10, 9, 2, 2, 15);
-    tileRect(t, 6, 13, 3, 1, 15);
-    tileRect(t, 13, 3, 1, 1, 14);
-
-    t = &tiles[T_WALL];
-    tileSet(t, "Mur", true, false, 2);
-    tileRect(t, 0, 7, 16, 1, 27);
-    tileRect(t, 0, 15, 16, 1, 27);
-    tileRect(t, 8, 0, 1, 7, 27);
-    tileRect(t, 4, 8, 1, 7, 27);
-    tileRect(t, 12, 8, 1, 7, 27);
-
-    t = &tiles[T_WATER];
-    tileSet(t, "Eau", true, false, 17);
-    tileRect(t, 3, 6, 10, 2, 18);
-    tileRect(t, 1, 12, 5, 1, 18);
-    tileRect(t, 10, 3, 4, 1, 18);
-
-    t = &tiles[T_TREE];
-    tileSet(t, "Arbre", true, false, 12);
-    tileRect(t, 3, 2, 10, 8, 28);
-    tileRect(t, 6, 10, 4, 6, 25);
-
-    t = &tiles[T_PATH];
-    tileSet(t, "Chemin", false, false, 23);
-    tileRect(t, 2, 3, 2, 1, 24);
-    tileRect(t, 10, 11, 3, 1, 24);
-
-    t = &tiles[T_FLOOR];
-    tileSet(t, "Sol", false, false, 24);
-    tileRect(t, 0, 5, 16, 1, 25);
-    tileRect(t, 0, 11, 16, 1, 25);
-
-    t = &tiles[T_DOOR];
-    tileSet(t, "Porte", false, false, 25);
-    tileRect(t, 3, 0, 10, 16, 26);
-
-    t = &tiles[T_TALL];
-    tileSet(t, "Hautes herbes", false, true, 15);
-    tileRect(t, 2, 6, 2, 9, 14);
-    tileRect(t, 7, 2, 2, 12, 13);
-    tileRect(t, 12, 7, 2, 8, 14);
-    tileRect(t, 1, 14, 14, 2, 12);
-
-    tileCount = T_COUNT;
-    for (i = 0; i < tileCount; i++)
-        tileRecolor(&tiles[i]);
+    for (i = 0; i < PAL_N; i++)
+        palCol[i] = COL(PAL_RGB[i][0], PAL_RGB[i][1], PAL_RGB[i][2]);
+    for (i = 0; i < BASE_TILES; i++)
+        defaultTile(i);
+    tileCount = BASE_TILES;
 }
 
-/* ---------- Textures : toutes les tuiles dans une seule image pour la console ---------- */
-
-/* reglages d'affichage (menu "Y" des editeurs) : au cas ou les textures sortiraient
- * a l'envers ou avec de mauvaises couleurs */
-static int texFlipV = 0, texBswap = 0, texSwapXY = 0;
-
-static C3D_Tex atlasTex;
-static Tex3DS_SubTexture atlasSub[ATLAS_SLOTS];
-static bool atlasOK = false;
-static bool atlasDirty = false;
-static u8 testPix[16][16];
-static Tile testTile;   /* le motif de test, pour le mode rectangles */
-
-/* mode d'affichage : 1 = rectangles (sur, par defaut), 0 = textures de la carte graphique */
-static int texMode = 1;
-#define TILE_RECT_BUDGET 5500
-static int rectBudget = TILE_RECT_BUDGET;   /* rectangles autorises par image */
-
-/* position d'un point dans un carre de 8x8 (ordre en Z utilise par la console) */
-static u32 mortonIndex(u32 x, u32 y) {
-    u32 i = 0, b;
-
-    for (b = 0; b < 3; b++) {
-        i |= ((x >> b) & 1u) << (2 * b);
-        i |= ((y >> b) & 1u) << (2 * b + 1);
-    }
-    return i;
-}
-
-static u32 texelOf(int idx) {
-    u32 w = ((u32)PAL[idx & 31][0] << 24) | ((u32)PAL[idx & 31][1] << 16) |
-            ((u32)PAL[idx & 31][2] << 8) | 0xFFu;
-    return texBswap ? __builtin_bswap32(w) : w;
-}
-
-/* ecrit une texture 16x16 (256 numeros de couleurs) dans la case "slot" de l'image */
-static void atlasWriteSlot(int slot, const u8 *pix) {
-    u32 *data;
-    int px, py;
-
-    if (!atlasOK || slot < 0 || slot >= ATLAS_SLOTS)
-        return;
-    data = (u32 *)atlasTex.data;
-    for (py = 0; py < 16; py++) {
-        for (px = 0; px < 16; px++) {
-            u32 x = (u32)((slot % 8) * 16 + px);
-            u32 y = (u32)(ATLAS_H - 1 - ((slot / 8) * 16 + py));
-            u32 m = texSwapXY ? mortonIndex(y & 7u, x & 7u) : mortonIndex(x & 7u, y & 7u);
-            data[((y >> 3) * (ATLAS_W >> 3) + (x >> 3)) * 64u + m] = texelOf(pix[py * 16 + px]);
-        }
-    }
-}
-
-static void atlasFlush(void) {
-    if (atlasOK)
-        GSPGPU_FlushDataCache(atlasTex.data, ATLAS_W * ATLAS_H * 4);
-}
-
-static void atlasSetupSubtex(void) {
+/* dessine un bloc (sc = 1 : taille normale 16 x 16) */
+static void drawTile(int t, float sx, float sy, float sc, float z) {
+    const Tile *tl;
     int i;
 
-    for (i = 0; i < ATLAS_SLOTS; i++) {
-        float x0 = (float)((i % 8) * 16);
-        float y0 = (float)((i / 8) * 16);
-        Tex3DS_SubTexture *s = &atlasSub[i];
-
-        s->width = 16;
-        s->height = 16;
-        s->left = x0 / ATLAS_W;
-        s->right = (x0 + 16.0f) / ATLAS_W;
-        if (!texFlipV) {
-            s->top = 1.0f - y0 / ATLAS_H;
-            s->bottom = 1.0f - (y0 + 16.0f) / ATLAS_H;
-        } else {
-            s->top = 1.0f - (y0 + 16.0f) / ATLAS_H;
-            s->bottom = 1.0f - y0 / ATLAS_H;
-        }
-    }
-}
-
-static void atlasRebuild(void) {
-    int i;
-
-    if (!atlasOK)
+    if (t < 0 || t >= tileCount)
+        t = 0;
+    tl = &tiles[t];
+    C2D_DrawRectSolid(sx, sy, z, TS * sc, TS * sc, palCol[tl->base]);
+    if (tl->nRuns == 0 || tl->nRuns > rectBudget)
         return;
-    atlasSetupSubtex();
-    for (i = 0; i < tileCount; i++)
-        atlasWriteSlot(i, &tiles[i].pix[0][0]);
-    atlasWriteSlot(TEST_SLOT, &testPix[0][0]);
-    atlasFlush();
-}
-
-static void atlasInit(void) {
-    int x, y;
-
-    /* motif de test : 4 carres de couleur, avec une barre noire a gauche de chacun */
-    for (y = 0; y < 16; y++) {
-        for (x = 0; x < 16; x++) {
-            int c = (y < 8) ? ((x < 8) ? 6 : 13) : ((x < 8) ? 17 : 11);
-            if ((x & 7) == 0)
-                c = 31;
-            testPix[y][x] = (u8)c;
-        }
-    }
-
-    memset(&testTile, 0, sizeof testTile);
-    memcpy(testTile.pix, testPix, sizeof testPix);
-    tileRecolor(&testTile);
-
-    atlasOK = C3D_TexInit(&atlasTex, ATLAS_W, ATLAS_H, GPU_RGBA8);
-    if (!atlasOK)
-        return;
-    memset(atlasTex.data, 0, ATLAS_W * ATLAS_H * 4);
-    C3D_TexSetFilter(&atlasTex, GPU_NEAREST, GPU_NEAREST);
-    C3D_TexSetWrap(&atlasTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-    atlasRebuild();
-}
-
-/* mode sur : un fond + quelques rectangles. Si l'image demande trop de rectangles,
- * les derniers blocs dessines sont remplaces par leur couleur moyenne (le jeu ne ralentit pas). */
-static void drawTileRects(const Tile *t, float x, float y, float z, float s) {
-    int i;
-
-    if ((int)t->nrect + 1 > rectBudget) {
-        C2D_DrawRectSolid(x, y, z, TS * s, TS * s, t->color);
-        rectBudget--;
-        return;
-    }
-    rectBudget -= (int)t->nrect + 1;
-    C2D_DrawRectSolid(x, y, z, TS * s, TS * s, palCol(t->base));
-    for (i = 0; i < (int)t->nrect; i++) {
-        const PRect *r = &t->r[i];
-        C2D_DrawRectSolid(x + r->x * s, y + r->y * s, z + 0.01f, r->w * s, r->h * s, palCol(r->c));
+    rectBudget -= tl->nRuns;
+    for (i = 0; i < tl->nRuns; i++) {
+        const Run *r = &tl->runs[i];
+        C2D_DrawRectSolid(sx + r->x * sc, sy + r->y * sc, z + 0.01f,
+                          r->w * sc, r->h * sc, palCol[r->c]);
     }
 }
 
-/* mode textures de la carte graphique */
-static bool drawSlotGPU(int slot, float x, float y, float z, float scale) {
-    C2D_Image img;
-
-    if (!atlasOK)
-        return false;
-    img.tex = &atlasTex;
-    img.subtex = &atlasSub[slot];
-    C2D_DrawImageAt(img, x, y, z, NULL, scale, scale);
-    return true;
-}
-
-/* dessine la case "slot" (scale = agrandissement) */
-static void drawSlot(int slot, float x, float y, float z, float scale) {
-    if (texMode == 0 && drawSlotGPU(slot, x, y, z, scale))
-        return;
-    if (slot == TEST_SLOT)
-        drawTileRects(&testTile, x, y, z, scale);
-    else if (slot < tileCount)
-        drawTileRects(&tiles[slot], x, y, z, scale);
-}
-
-static void drawTile(int idx, float x, float y, float z, float scale) {
-    if (idx < 0 || idx >= tileCount)
-        idx = 0;
-    drawSlot(idx, x, y, z, scale);
-}
-
-static void saveDisplay(void) {
-    u8 b[8] = { 'R', 'P', 'G', 'D', 0, 0, 0, 1 };
-    FILE *f;
-
-    b[4] = (u8)texFlipV;
-    b[5] = (u8)texBswap;
-    b[6] = (u8)texSwapXY;
-    b[7] = (u8)texMode;
-    mkdir("sdmc:/3ds", 0777);
-    mkdir(SAVE_DIR, 0777);
-    f = fopen(DISPLAY_FILE, "wb");
-    if (f != NULL) {
-        fwrite(b, 1, sizeof b, f);
-        fclose(f);
-    }
-}
-
-static void loadDisplay(void) {
-    u8 b[8] = { 0, 0, 0, 0, 0, 0, 0, 1 };
-    FILE *f = fopen(DISPLAY_FILE, "rb");
-
-    if (f == NULL)
-        return;
-    if (fread(b, 1, sizeof b, f) >= 7 && memcmp(b, "RPGD", 4) == 0) {
-        texMode = b[7] ? 1 : 0;
-        texFlipV = b[4] ? 1 : 0;
-        texBswap = b[5] ? 1 : 0;
-        texSwapXY = b[6] ? 1 : 0;
-    }
-    fclose(f);
-}
-
-/* ---------- Tuiles : sauvegarde, suppression ---------- */
-
-#define TILE_REC (TILE_NAME + 1 + 256)
+/* ---------- Sauvegarde / chargement des blocs ---------- */
 
 static bool saveTiles(void) {
-    u8 hdr[6] = { 'R', 'P', 'G', 'T', 1, 0 };
+    u8 header[MON_HEADER] = { 'R', 'P', 'G', 'B', 1, 0 };
     u8 rec[TILE_REC];
     FILE *f;
     bool ok;
     int i;
 
-    hdr[5] = (u8)tileCount;
+    header[5] = (u8)tileCount;
     mkdir("sdmc:/3ds", 0777);
     mkdir(SAVE_DIR, 0777);
-    f = fopen(TILES_FILE, "wb");
+
+    f = fopen(TILE_FILE, "wb");
     if (f == NULL)
         return false;
-
-    ok = (fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr);
+    ok = (fwrite(header, 1, MON_HEADER, f) == MON_HEADER);
     for (i = 0; ok && i < tileCount; i++) {
         memset(rec, 0, sizeof rec);
-        strncpy((char *)rec, tiles[i].name, TILE_NAME - 1);
-        rec[TILE_NAME] = (u8)((tiles[i].solid ? 1 : 0) | (tiles[i].tall ? 2 : 0));
-        memcpy(rec + TILE_NAME + 1, tiles[i].pix, 256);
+        memcpy(rec, tiles[i].name, NAME_BYTES - 1);
+        rec[NAME_BYTES] = tiles[i].solid ? 1 : 0;
+        rec[NAME_BYTES + 1] = tiles[i].wild ? 1 : 0;
+        memcpy(rec + NAME_BYTES + 2, tiles[i].px, TS * TS);
         ok = (fwrite(rec, 1, TILE_REC, f) == TILE_REC);
     }
     fclose(f);
@@ -478,79 +321,70 @@ static bool saveTiles(void) {
 }
 
 static bool loadTiles(void) {
-    static Tile tmp[MAX_TILES];
-    u8 hdr[6];
+    u8 header[MON_HEADER];
     u8 rec[TILE_REC];
     FILE *f;
-    int i, k, count;
+    long size;
+    int i, count;
 
-    f = fopen(TILES_FILE, "rb");
+    f = fopen(TILE_FILE, "rb");
     if (f == NULL)
         return false;
-
-    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr || memcmp(hdr, "RPGT", 4) != 0 ||
-        hdr[4] != 1 || hdr[5] < 1 || hdr[5] > MAX_TILES) {
+    if (fread(header, 1, MON_HEADER, f) != MON_HEADER ||
+        memcmp(header, "RPGB", 4) != 0 || header[4] != 1 ||
+        header[5] < BASE_TILES || header[5] > MAX_TILES) {
         fclose(f);
         return false;
     }
+    count = header[5];
 
-    count = hdr[5];
+    /* on verifie la taille avant de toucher aux blocs en memoire */
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    if (size != (long)(MON_HEADER + count * TILE_REC)) {
+        fclose(f);
+        return false;
+    }
+    fseek(f, MON_HEADER, SEEK_SET);
+
     for (i = 0; i < count; i++) {
+        Tile *t = &tiles[i];
+
         if (fread(rec, 1, TILE_REC, f) != TILE_REC) {
             fclose(f);
             return false;
         }
-        memset(&tmp[i], 0, sizeof tmp[i]);
-        memcpy(tmp[i].name, rec, TILE_NAME);
-        tmp[i].name[TILE_NAME - 1] = '\0';
-        if (tmp[i].name[0] == '\0')
-            snprintf(tmp[i].name, TILE_NAME, "Bloc %d", i + 1);
-        tmp[i].solid = (rec[TILE_NAME] & 1) != 0;
-        tmp[i].tall = (rec[TILE_NAME] & 2) != 0;
-        for (k = 0; k < 256; k++)
-            ((u8 *)tmp[i].pix)[k] = rec[TILE_NAME + 1 + k] & 31;
-        tileRecolor(&tmp[i]);
+        memset(t, 0, sizeof *t);
+        memcpy(t->name, rec, NAME_BYTES);
+        t->name[NAME_BYTES - 1] = '\0';
+        if (t->name[0] == '\0')
+            snprintf(t->name, NAME_BYTES, "Bloc %d", i);
+        t->solid = rec[NAME_BYTES] != 0;
+        t->wild = rec[NAME_BYTES + 1] != 0;
+        memcpy(t->px, rec + NAME_BYTES + 2, TS * TS);
+        compileTile(t);
     }
     fclose(f);
-
-    memcpy(tiles, tmp, sizeof(Tile) * (size_t)count);
     tileCount = count;
     return true;
 }
 
-/* aucune case de la carte ne doit pointer vers un bloc qui n'existe pas */
-static void mapClampTiles(void) {
-    int x, y;
+/* ---------- Zones (cartes) ---------- */
 
-    for (y = 0; y < MAP_H; y++)
-        for (x = 0; x < MAP_W; x++)
-            if (map[y][x] >= tileCount)
-                map[y][x] = 0;
-}
+#define ZMIN_W      25     /* au moins la taille de l'ecran du haut */
+#define ZMIN_H      15
+#define ZMAX_W      100
+#define ZMAX_H      100
+#define ZONE_DEF_W  30
+#define ZONE_DEF_H  20
+#define MAX_ZONES   16
 
-/* supprime un bloc : les cases de la carte qui l'utilisaient deviennent le bloc 1 */
-static bool tileDelete(int k) {
-    int i, x, y;
+static u8 mapData[ZMAX_W * ZMAX_H];
+static int mapW = 50, mapH = 30;          /* taille de la zone chargee */
+static int curZone = 1, zoneCount = 1;    /* numeros a partir de 1 */
+static int spawnTX = 12, spawnTY = 13;    /* point de depart (en tuiles) */
 
-    if (tileCount <= 1 || k < 0 || k >= tileCount)
-        return false;
-    for (i = k; i < tileCount - 1; i++)
-        tiles[i] = tiles[i + 1];
-    tileCount--;
-
-    for (y = 0; y < MAP_H; y++) {
-        for (x = 0; x < MAP_W; x++) {
-            int v = map[y][x];
-            if (v == k)
-                v = 0;
-            else if (v > k)
-                v--;
-            map[y][x] = (u8)v;
-        }
-    }
-    mapClampTiles();
-    return true;
-}
+#define MAP(x, y) mapData[(y) * mapW + (x)]
 
 /* ---------- Carte par defaut ---------- */
 
@@ -561,30 +395,33 @@ static unsigned rnd(void) {
     return (rngState >> 16) & 0x7FFF;
 }
 
+/* la zone 1 par defaut : 50 x 30 avec lac, maison, chemin et hautes herbes */
 static void buildMap(void) {
     int x, y, i;
 
-    for (y = 0; y < MAP_H; y++)
-        for (x = 0; x < MAP_W; x++)
-            map[y][x] = T_GRASS;
+    mapW = 50;
+    mapH = 30;
+    for (y = 0; y < mapH; y++)
+        for (x = 0; x < mapW; x++)
+            MAP(x, y) = T_GRASS;
 
     /* bordure d'arbres */
-    for (x = 0; x < MAP_W; x++) {
-        map[0][x] = T_TREE;
-        map[MAP_H - 1][x] = T_TREE;
+    for (x = 0; x < mapW; x++) {
+        MAP(x, 0) = T_TREE;
+        MAP(x, mapH - 1) = T_TREE;
     }
-    for (y = 0; y < MAP_H; y++) {
-        map[y][0] = T_TREE;
-        map[y][MAP_W - 1] = T_TREE;
+    for (y = 0; y < mapH; y++) {
+        MAP(0, y) = T_TREE;
+        MAP(mapW - 1, y) = T_TREE;
     }
 
     /* lac */
-    for (y = 0; y < MAP_H; y++) {
-        for (x = 0; x < MAP_W; x++) {
+    for (y = 0; y < mapH; y++) {
+        for (x = 0; x < mapW; x++) {
             float dx = (x - 36) / 7.0f;
             float dy = (y - 22) / 4.0f;
             if (dx * dx + dy * dy <= 1.0f)
-                map[y][x] = T_WATER;
+                MAP(x, y) = T_WATER;
         }
     }
 
@@ -592,27 +429,27 @@ static void buildMap(void) {
     for (y = 5; y <= 10; y++) {
         for (x = 8; x <= 16; x++) {
             bool edge = (x == 8 || x == 16 || y == 5 || y == 10);
-            map[y][x] = edge ? T_WALL : T_FLOOR;
+            MAP(x, y) = edge ? T_WALL : T_FLOOR;
         }
     }
-    map[10][12] = T_DOOR;
+    MAP(12, 10) = T_DOOR;
 
     /* chemin : de la porte vers le bas, puis vers la droite */
     for (y = 11; y <= 14; y++)
-        map[y][12] = T_PATH;
-    for (x = 12; x < MAP_W - 1; x++)
-        map[14][x] = T_PATH;
+        MAP(12, y) = T_PATH;
+    for (x = 12; x < mapW - 1; x++)
+        MAP(x, 14) = T_PATH;
 
     /* zones de hautes herbes (la ou les monstres apparaissent) */
     {
         static const int patch[3][4] = { { 30, 8, 6, 3 }, { 18, 21, 5, 3 }, { 44, 6, 4, 3 } };
         for (i = 0; i < 3; i++) {
-            for (y = 0; y < MAP_H; y++) {
-                for (x = 0; x < MAP_W; x++) {
+            for (y = 0; y < mapH; y++) {
+                for (x = 0; x < mapW; x++) {
                     float dx = (x - patch[i][0]) / (float)patch[i][2];
                     float dy = (y - patch[i][1]) / (float)patch[i][3];
-                    if (dx * dx + dy * dy <= 1.0f && map[y][x] == T_GRASS)
-                        map[y][x] = T_TALL;
+                    if (dx * dx + dy * dy <= 1.0f && MAP(x, y) == T_GRASS)
+                        MAP(x, y) = T_TALL;
                 }
             }
         }
@@ -621,71 +458,416 @@ static void buildMap(void) {
     /* arbres au hasard (toujours les memes) */
     rngState = 12345;
     for (i = 0; i < 90; i++) {
-        x = 1 + (int)(rnd() % (MAP_W - 2));
-        y = 1 + (int)(rnd() % (MAP_H - 2));
-        if (map[y][x] == T_GRASS)
-            map[y][x] = T_TREE;
+        x = 1 + (int)(rnd() % (mapW - 2));
+        y = 1 + (int)(rnd() % (mapH - 2));
+        if (MAP(x, y) == T_GRASS)
+            MAP(x, y) = T_TREE;
     }
 
     spawnTX = 12;
     spawnTY = 13;
 }
 
-/* ---------- Sauvegarde / chargement (carte SD) ---------- */
-
-static bool saveMap(void) {
-    u8 header[HEADER_SIZE] = { 'R', 'P', 'G', '2', 1, MAP_W, MAP_H, 0, 0 };
-    FILE *f;
-    bool ok;
-
-    header[7] = (u8)spawnTX;
-    header[8] = (u8)spawnTY;
-
-    mkdir("sdmc:/3ds", 0777);
-    mkdir(SAVE_DIR, 0777);
-
-    f = fopen(SAVE_FILE, "wb");
-    if (f == NULL)
-        return false;
-
-    ok = (fwrite(header, 1, HEADER_SIZE, f) == HEADER_SIZE) &&
-         (fwrite(map, 1, sizeof map, f) == sizeof map);
-    fclose(f);
-    return ok;
-}
-
-static bool loadMap(void) {
-    static u8 tmp[MAP_H][MAP_W];
-    u8 header[HEADER_SIZE];
-    FILE *f;
+/* une nouvelle zone vide : de l'herbe entouree d'arbres */
+static void buildBlank(int w, int h) {
     int x, y;
 
-    f = fopen(SAVE_FILE, "rb");
+    mapW = w;
+    mapH = h;
+    for (y = 0; y < mapH; y++) {
+        for (x = 0; x < mapW; x++) {
+            bool edge = (x == 0 || y == 0 || x == mapW - 1 || y == mapH - 1);
+            MAP(x, y) = edge ? T_TREE : T_GRASS;
+        }
+    }
+    spawnTX = 2;
+    spawnTY = 2;
+}
+
+/* ---------- Sauvegarde / chargement des zones (carte SD) ---------- */
+
+/* une zone lue dans un fichier, sans toucher a la zone chargee */
+typedef struct {
+    int w, h, sx, sy;
+    u8 d[ZMAX_W * ZMAX_H];
+} ZoneBuf;
+
+static ZoneBuf zb;
+
+static void zonePath(char *buf, size_t n, int z) {
+    snprintf(buf, n, SAVE_DIR "/map%d.bin", z);
+}
+
+static bool zoneExists(int z) {
+    char path[64];
+    struct stat st;
+
+    zonePath(path, sizeof path, z);
+    return stat(path, &st) == 0;
+}
+
+static int countZones(void) {
+    int n = 0;
+
+    while (n < MAX_ZONES && zoneExists(n + 1))
+        n++;
+    return (n < 1) ? 1 : n;
+}
+
+static bool readZoneFile(int z, ZoneBuf *b) {
+    u8 header[HEADER_SIZE];
+    char path[64];
+    FILE *f;
+    int w, h, i;
+
+    zonePath(path, sizeof path, z);
+    f = fopen(path, "rb");
     if (f == NULL)
         return false;
 
     if (fread(header, 1, HEADER_SIZE, f) != HEADER_SIZE ||
-        memcmp(header, "RPG2", 4) != 0 || header[4] != 1 ||
-        header[5] != MAP_W || header[6] != MAP_H ||
-        fread(tmp, 1, sizeof tmp, f) != sizeof tmp) {
+        memcmp(header, "RPG2", 4) != 0 || header[4] != 1) {
+        fclose(f);
+        return false;
+    }
+    w = header[5];
+    h = header[6];
+    if (w < ZMIN_W || w > ZMAX_W || h < ZMIN_H || h > ZMAX_H ||
+        fread(b->d, 1, (size_t)w * h, f) != (size_t)w * h) {
         fclose(f);
         return false;
     }
     fclose(f);
 
-    for (y = 0; y < MAP_H; y++)
-        for (x = 0; x < MAP_W; x++)
-            map[y][x] = (tmp[y][x] < tileCount) ? tmp[y][x] : 0;
-
-    spawnTX = (header[7] < MAP_W) ? header[7] : 1;
-    spawnTY = (header[8] < MAP_H) ? header[8] : 1;
+    b->w = w;
+    b->h = h;
+    b->sx = (header[7] < w) ? header[7] : 1;
+    b->sy = (header[8] < h) ? header[8] : 1;
+    for (i = 0; i < w * h; i++)
+        if (b->d[i] >= tileCount)
+            b->d[i] = T_GRASS;
     return true;
 }
 
-static void loadOrDefault(void) {
-    if (!loadMap())
+static bool writeZoneFile(int z, const ZoneBuf *b) {
+    u8 header[HEADER_SIZE] = { 'R', 'P', 'G', '2', 1, 0, 0, 0, 0 };
+    char path[64];
+    FILE *f;
+    bool ok;
+
+    header[5] = (u8)b->w;
+    header[6] = (u8)b->h;
+    header[7] = (u8)b->sx;
+    header[8] = (u8)b->sy;
+
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(SAVE_DIR, 0777);
+
+    zonePath(path, sizeof path, z);
+    f = fopen(path, "wb");
+    if (f == NULL)
+        return false;
+    ok = (fwrite(header, 1, HEADER_SIZE, f) == HEADER_SIZE) &&
+         (fwrite(b->d, 1, (size_t)b->w * b->h, f) == (size_t)b->w * b->h);
+    fclose(f);
+    return ok;
+}
+
+/* sauvegarde la zone chargee */
+static bool saveZone(void) {
+    zb.w = mapW;
+    zb.h = mapH;
+    zb.sx = spawnTX;
+    zb.sy = spawnTY;
+    memcpy(zb.d, mapData, (size_t)mapW * mapH);
+    return writeZoneFile(curZone, &zb);
+}
+
+/* charge la zone z (la zone 1 est creee par defaut si elle n'existe pas) */
+static bool loadZone(int z) {
+    if (readZoneFile(z, &zb)) {
+        mapW = zb.w;
+        mapH = zb.h;
+        spawnTX = zb.sx;
+        spawnTY = zb.sy;
+        memcpy(mapData, zb.d, (size_t)zb.w * zb.h);
+        curZone = z;
+        return true;
+    }
+    if (z == 1) {
         buildMap();
-    mapClampTiles();
+        curZone = 1;
+        return true;
+    }
+    return false;
+}
+
+/* ---------- Teleporteurs (invisibles en jeu) ---------- */
+
+#define MAX_TELES   64
+#define MAX_LINK    99
+#define TELE_FILE   "sdmc:/3ds/rpg2ds/teles.bin"
+
+/* deux teleporteurs avec le meme numero de lien sont relies entre eux */
+typedef struct { u8 zone, x, y, link; } Tele;
+
+static Tele teles[MAX_TELES];
+static int teleCount = 0;
+
+static int teleFind(int zone, int x, int y) {
+    int i;
+    for (i = 0; i < teleCount; i++)
+        if (teles[i].zone == zone && teles[i].x == x && teles[i].y == y)
+            return i;
+    return -1;
+}
+
+static int teleLinkCount(int link) {
+    int i, n = 0;
+    for (i = 0; i < teleCount; i++)
+        if (teles[i].link == link)
+            n++;
+    return n;
+}
+
+static void teleRemove(int i) {
+    if (i < 0 || i >= teleCount)
+        return;
+    memmove(&teles[i], &teles[i + 1], (size_t)(teleCount - i - 1) * sizeof(Tele));
+    teleCount--;
+}
+
+/* pose (ou modifie) un teleporteur ; faux si la table est pleine */
+static bool teleSet(int zone, int x, int y, int link) {
+    int i = teleFind(zone, x, y);
+
+    if (i < 0) {
+        if (teleCount >= MAX_TELES)
+            return false;
+        i = teleCount++;
+        teles[i].zone = (u8)zone;
+        teles[i].x = (u8)x;
+        teles[i].y = (u8)y;
+    }
+    teles[i].link = (u8)link;
+    return true;
+}
+
+/* le teleporteur ou on arrive : le suivant (dans l'ordre de la table) avec le meme lien */
+static int teleDest(int i) {
+    int k, j;
+    for (k = 1; k < teleCount; k++) {
+        j = (i + k) % teleCount;
+        if (teles[j].link == teles[i].link)
+            return j;
+    }
+    return -1;
+}
+
+/* numero de lien conseille : celui d'un teleporteur encore seul, sinon un numero libre */
+static int teleSuggestLink(void) {
+    int l;
+    for (l = 1; l <= MAX_LINK; l++)
+        if (teleLinkCount(l) == 1)
+            return l;
+    for (l = 1; l <= MAX_LINK; l++)
+        if (teleLinkCount(l) == 0)
+            return l;
+    return 1;
+}
+
+/* la zone z est supprimee : ses teleporteurs disparaissent, les zones suivantes reculent */
+static void teleDropZone(int z) {
+    int i = 0;
+    while (i < teleCount) {
+        if (teles[i].zone == z) {
+            teleRemove(i);
+        } else {
+            if (teles[i].zone > z)
+                teles[i].zone--;
+            i++;
+        }
+    }
+}
+
+/* la zone a change de taille : on decale les teleporteurs et on retire ceux qui sortent */
+static void teleShift(int zone, int dx, int dy, int w, int h) {
+    int i = 0;
+    while (i < teleCount) {
+        if (teles[i].zone == zone) {
+            int nx = teles[i].x + dx, ny = teles[i].y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
+                teleRemove(i);
+                continue;
+            }
+            teles[i].x = (u8)nx;
+            teles[i].y = (u8)ny;
+        }
+        i++;
+    }
+}
+
+static bool saveTeles(void) {
+    u8 header[MON_HEADER] = { 'R', 'P', 'G', 'P', 1, 0 };
+    FILE *f;
+    bool ok;
+    int i;
+
+    header[5] = (u8)teleCount;
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(SAVE_DIR, 0777);
+
+    f = fopen(TELE_FILE, "wb");
+    if (f == NULL)
+        return false;
+    ok = (fwrite(header, 1, MON_HEADER, f) == MON_HEADER);
+    for (i = 0; ok && i < teleCount; i++) {
+        u8 rec[4];
+        rec[0] = teles[i].zone;
+        rec[1] = teles[i].x;
+        rec[2] = teles[i].y;
+        rec[3] = teles[i].link;
+        ok = (fwrite(rec, 1, 4, f) == 4);
+    }
+    fclose(f);
+    return ok;
+}
+
+static bool loadTeles(void) {
+    u8 header[MON_HEADER];
+    FILE *f;
+    int i, count, n = 0;
+
+    teleCount = 0;
+    f = fopen(TELE_FILE, "rb");
+    if (f == NULL)
+        return false;
+    if (fread(header, 1, MON_HEADER, f) != MON_HEADER ||
+        memcmp(header, "RPGP", 4) != 0 || header[4] != 1 || header[5] > MAX_TELES) {
+        fclose(f);
+        return false;
+    }
+    count = header[5];
+    for (i = 0; i < count; i++) {
+        u8 rec[4];
+        if (fread(rec, 1, 4, f) != 4)
+            break;
+        if (rec[0] < 1 || rec[0] > MAX_ZONES || rec[1] >= ZMAX_W || rec[2] >= ZMAX_H ||
+            rec[3] < 1 || rec[3] > MAX_LINK)
+            continue;
+        teles[n].zone = rec[0];
+        teles[n].x = rec[1];
+        teles[n].y = rec[2];
+        teles[n].link = rec[3];
+        n++;
+    }
+    fclose(f);
+    teleCount = n;
+    return true;
+}
+
+/* ---------- Operations sur les zones ---------- */
+
+/* agrandit (ou reduit) la zone chargee : l, r, t, b = colonnes/lignes ajoutees (ou retirees)
+   a gauche, a droite, en haut, en bas ; les nouvelles cases recoivent le bloc fill */
+static bool resizeMap(int l, int r, int t, int b, int fill) {
+    static u8 tmp[ZMAX_W * ZMAX_H];
+    int nw = mapW + l + r, nh = mapH + t + b;
+    int x, y;
+
+    if (nw < ZMIN_W || nw > ZMAX_W || nh < ZMIN_H || nh > ZMAX_H)
+        return false;
+    if (fill < 0 || fill >= tileCount)
+        fill = T_GRASS;
+
+    memset(tmp, fill, (size_t)nw * nh);
+    for (y = 0; y < nh; y++) {
+        int sy = y - t;
+        if (sy < 0 || sy >= mapH)
+            continue;
+        for (x = 0; x < nw; x++) {
+            int sx = x - l;
+            if (sx >= 0 && sx < mapW)
+                tmp[y * nw + x] = MAP(sx, sy);
+        }
+    }
+    memcpy(mapData, tmp, (size_t)nw * nh);
+    mapW = nw;
+    mapH = nh;
+
+    teleShift(curZone, l, t, nw, nh);
+    spawnTX += l;
+    spawnTY += t;
+    if (spawnTX < 0) spawnTX = 0;
+    if (spawnTX >= nw) spawnTX = nw - 1;
+    if (spawnTY < 0) spawnTY = 0;
+    if (spawnTY >= nh) spawnTY = nh - 1;
+    return true;
+}
+
+/* ajoute une zone vide a la fin et la charge (l'appelant sauvegarde avant) */
+static bool newZone(void) {
+    if (zoneCount >= MAX_ZONES)
+        return false;
+    zoneCount++;
+    curZone = zoneCount;
+    buildBlank(ZONE_DEF_W, ZONE_DEF_H);
+    return saveZone();
+}
+
+/* supprime la zone z : les suivantes reculent d'un numero ; charge ensuite une zone voisine */
+static bool deleteZone(int z) {
+    char path[64];
+    int i;
+
+    if (zoneCount <= 1 || z < 1 || z > zoneCount)
+        return false;
+
+    teleDropZone(z);
+    for (i = z + 1; i <= zoneCount; i++) {
+        if (readZoneFile(i, &zb))
+            writeZoneFile(i - 1, &zb);
+    }
+    zonePath(path, sizeof path, zoneCount);
+    remove(path);
+    zoneCount--;
+
+    curZone = (z <= zoneCount) ? z : zoneCount;
+    loadZone(curZone);
+    saveTeles();
+    return true;
+}
+
+/* supprime le bloc id (>= BASE_TILES) : dans toutes les zones, il devient de l'herbe
+   et les blocs suivants reculent d'un numero */
+static void remapCells(u8 *d, int n, int id) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (d[i] == id)
+            d[i] = T_GRASS;
+        else if (d[i] > id)
+            d[i]--;
+    }
+}
+
+static void tileDelete(int id) {
+    int i, z;
+
+    if (id < BASE_TILES || id >= tileCount)
+        return;
+
+    /* d'abord les zones (avec l'ancien nombre de blocs), puis la liste des blocs */
+    for (z = 1; z <= zoneCount; z++) {
+        if (readZoneFile(z, &zb)) {
+            remapCells(zb.d, zb.w * zb.h, id);
+            writeZoneFile(z, &zb);
+        }
+    }
+    remapCells(mapData, mapW * mapH, id);
+
+    for (i = id; i < tileCount - 1; i++)
+        tiles[i] = tiles[i + 1];
+    tileCount--;
 }
 
 /* ---------- Monstres : donnees ---------- */
@@ -1649,9 +1831,9 @@ static bool solidAt(int px, int py) {
         return true;
     tx = px / TS;
     ty = py / TS;
-    if (tx >= MAP_W || ty >= MAP_H)
+    if (tx >= mapW || ty >= mapH)
         return true;
-    return TILES[map[ty][tx]].solid;
+    return tiles[MAP(tx, ty)].solid;
 }
 
 static bool blocked(int x, int y) {
@@ -1660,27 +1842,28 @@ static bool blocked(int x, int y) {
 }
 
 static void updateCamera(void) {
-    int maxX = MAP_W * TS - TOP_W;
-    int maxY = MAP_H * TS - TOP_H;
+    int maxX = mapW * TS - TOP_W;
+    int maxY = mapH * TS - TOP_H;
 
     camX = player.x + PW / 2 - TOP_W / 2;
     camY = player.y + PH / 2 - TOP_H / 2;
 
-    if (camX < 0) camX = 0;
     if (camX > maxX) camX = maxX;
-    if (camY < 0) camY = 0;
+    if (camX < 0) camX = 0;
     if (camY > maxY) camY = maxY;
+    if (camY < 0) camY = 0;
 }
 
 /* place le joueur sur la tuile libre la plus proche de (tx, ty) */
 static void placePlayerAtTile(int tx, int ty) {
     int r, dx, dy;
+    int rmax = (mapW > mapH) ? mapW : mapH;
 
-    for (r = 0; r < MAP_W; r++) {
+    for (r = 0; r < rmax; r++) {
         for (dy = -r; dy <= r; dy++) {
             for (dx = -r; dx <= r; dx++) {
                 int x = tx + dx, y = ty + dy;
-                if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H)
+                if (x < 0 || y < 0 || x >= mapW || y >= mapH)
                     continue;
                 if (!blocked(x * TS + 2, y * TS + 2)) {
                     player.x = x * TS + 2;
@@ -1719,9 +1902,9 @@ static bool tallAtPx(int px, int py) {
         return false;
     tx = px / TS;
     ty = py / TS;
-    if (tx >= MAP_W || ty >= MAP_H)
+    if (tx >= mapW || ty >= mapH)
         return false;
-    return tiles[map[ty][tx]].tall;
+    return tiles[MAP(tx, ty)].wild;
 }
 
 /* le monstre reste toujours dans les hautes herbes */
@@ -1735,6 +1918,54 @@ static void wildClear(void) {
     wildSpawnTimer = 60;
     encounters = 0;
     encTimer = 0;
+}
+
+/* on change de zone : les monstres sauvages de l'ancienne zone disparaissent */
+static void wildReset(void) {
+    memset(wild, 0, sizeof wild);
+    wildSpawnTimer = 60;
+}
+
+/* ---------- Zones en jeu : point de depart et teleporteurs ---------- */
+
+static int playStartZone = 1;     /* la zone ou la partie a commence */
+static bool teleLock = false;     /* on vient d'arriver sur un teleporteur : il ne repart pas */
+
+/* retour au point de depart (apres une defaite) */
+static void respawnHero(void) {
+    if (curZone != playStartZone) {
+        loadZone(playStartZone);
+        wildReset();
+    }
+    placePlayerAtTile(spawnTX, spawnTY);
+    teleLock = true;
+}
+
+/* a appeler apres chaque deplacement : marcher sur un teleporteur envoie sur son jumeau */
+static void checkTeleport(void) {
+    int tx = (player.x + PW / 2) / TS;
+    int ty = (player.y + PH / 2) / TS;
+    int i = teleFind(curZone, tx, ty);
+    int d;
+
+    if (i < 0) {
+        teleLock = false;
+        return;
+    }
+    if (teleLock)
+        return;
+    d = teleDest(i);
+    if (d < 0)
+        return;   /* pas de jumeau : rien ne se passe */
+
+    if (teles[d].zone != curZone) {
+        if (!loadZone(teles[d].zone))
+            return;
+        wildReset();
+    }
+    placePlayerAtTile(teles[d].x, teles[d].y);
+    teleLock = true;
+    updateCamera();
 }
 
 static int wildCount(void) {
@@ -1767,9 +1998,9 @@ static void wildTrySpawn(void) {
         int ddx, ddy;
         bool taken = false;
 
-        if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H)
+        if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH)
             continue;
-        if (!tiles[map[ty][tx]].tall)
+        if (!tiles[MAP(tx, ty)].wild)
             continue;
         ddx = tx - ptx;
         ddy = ty - pty;
@@ -1856,7 +2087,7 @@ static bool wildUpdate(void) {
 
 /* ---------- Etat global ---------- */
 
-enum { S_TITLE, S_PLAY, S_EDIT, S_EDMENU, S_FORM, S_BATTLE, S_INV, S_BLOCKS, S_CALIB };
+enum { S_TITLE, S_PLAY, S_EDIT, S_EDMENU, S_FORM, S_BATTLE, S_INV, S_TILEEDIT, S_ZONE };
 
 static int state = S_TITLE;
 static bool running = true;
@@ -1864,7 +2095,9 @@ static bool fromEditor = false;   /* le jeu a ete lance depuis l'editeur */
 static C2D_TextBuf g_textBuf;
 
 /* editeur */
-static int editTile = T_GRASS;    /* tuile choisie */
+static int editTile = T_GRASS;    /* bloc choisi (tileCount = l'outil teleporteur) */
+static int editLink = 1;          /* numero de lien du prochain teleporteur */
+static int edZone = 1;            /* zone ouverte dans l'editeur */
 static int ecx = 0, ecy = 0;      /* coin haut-gauche de la zone affichee (en tuiles) */
 static bool painting = false;     /* le stylet a commence a toucher dans l'editeur */
 static const char *editMsg = "";
@@ -1896,7 +2129,7 @@ static Button edButtons[N_ED_BUTTONS] = {
     { 50, 116, 220, 24, "Attaques", true },
     { 50, 144, 220, 24, "Objets",   true },
     { 50, 172, 220, 24, "Héros",    true },
-    { 50, 206, 220, 26, "Retour",   true },
+    { 50, 208, 220, 24, "Retour",   true },
 };
 static int edSel = 0;
 
@@ -1938,14 +2171,18 @@ static void drawTextInRect(const char *s, float x, float y, float w, float h,
                  0.5f, sc, sc, col);
 }
 
-static void drawButton(const Button *b, bool selected) {
+static void drawButtonSc(const Button *b, bool selected, float sc) {
     u32 border = selected ? COL(255, 220, 80) : COL(20, 20, 30);
     u32 fill = b->enabled ? COL(60, 90, 160) : COL(70, 70, 80);
     u32 txt = b->enabled ? COL(255, 255, 255) : COL(160, 160, 170);
 
     C2D_DrawRectSolid(b->x - 3, b->y - 3, 0.0f, b->w + 6, b->h + 6, border);
     C2D_DrawRectSolid(b->x, b->y, 0.1f, b->w, b->h, fill);
-    drawTextInRect(b->label, b->x, b->y, b->w, b->h, 0.6f, txt);
+    drawTextInRect(b->label, b->x, b->y, b->w, b->h, sc, txt);
+}
+
+static void drawButton(const Button *b, bool selected) {
+    drawButtonSc(b, selected, 0.6f);
 }
 
 /* ---------- Combat ---------- */
@@ -2243,7 +2480,7 @@ static void finishBattle(void) {
         snprintf(encMsg, sizeof encMsg, "Victoire ! +%d XP", bt.xpGain);
     } else if (bt.result == R_LOSE) {
         hero.hp = heroStat(ST_HP);
-        placePlayerAtTile(spawnTX, spawnTY);
+        respawnHero();
         snprintf(encMsg, sizeof encMsg, "Tu te réveilles au point de départ");
     } else {
         hero.hp = clampInt(bt.pHp, 1, heroStat(ST_HP));
@@ -2421,6 +2658,8 @@ static void updateInventory(u32 kDown) {
 /* ---------- Changements d'etat ---------- */
 
 static void startPlay(void) {
+    playStartZone = curZone;
+    teleLock = true;   /* si le depart est sur un teleporteur, il ne se declenche pas */
     placePlayerAtTile(spawnTX, spawnTY);
     player.dir = 0;
     dbgReset();
@@ -2433,9 +2672,16 @@ static void startPlay(void) {
     state = S_PLAY;
 }
 
+static void clampEditor(void);
+
 static void leavePlay(void) {
     saveHero();
     if (fromEditor) {
+        /* on revient dans la zone ou le test a commence */
+        if (curZone != playStartZone)
+            loadZone(playStartZone);
+        edZone = curZone;
+        clampEditor();
         state = S_EDIT;
         painting = false;
     } else {
@@ -2445,10 +2691,10 @@ static void leavePlay(void) {
 }
 
 static void clampEditor(void) {
+    if (ecx > mapW - VIEW_W) ecx = mapW - VIEW_W;
     if (ecx < 0) ecx = 0;
-    if (ecx > MAP_W - VIEW_W) ecx = MAP_W - VIEW_W;
+    if (ecy > mapH - VIEW_H) ecy = mapH - VIEW_H;
     if (ecy < 0) ecy = 0;
-    if (ecy > MAP_H - VIEW_H) ecy = MAP_H - VIEW_H;
 }
 
 static void enterEditor(void) {
@@ -2461,10 +2707,11 @@ static void enterEditor(void) {
 }
 
 static void enterForm(int kind);
+static void enterTileEd(void);
 
 static void activate(int i) {
     if (i == 0) {
-        loadOrDefault();
+        loadZone(1);
         fromEditor = false;
         startPlay();
     } else if (i == 1) {
@@ -2475,15 +2722,15 @@ static void activate(int i) {
     }
 }
 
-static void enterBlocks(void);
-static void enterCalib(int ret);
-
 static void activateEd(int i) {
     if (i == 0) {
-        loadOrDefault();
+        if (!loadZone(edZone)) {
+            edZone = 1;
+            loadZone(1);
+        }
         enterEditor();
     } else if (i == 1) {
-        enterBlocks();
+        enterTileEd();
     } else if (i <= 6) {
         enterForm(i - 2);
     } else {
@@ -2520,7 +2767,6 @@ static void updateEdMenu(u32 kDown) {
     if (kDown & KEY_UP)   edSel = (edSel + N_ED_BUTTONS - 1) % N_ED_BUTTONS;
     if (kDown & KEY_A)    activateEd(edSel);
     if (kDown & KEY_B)    state = S_TITLE;
-    if (kDown & KEY_Y)    enterCalib(S_EDMENU);
 
     if (kDown & KEY_TOUCH) {
         touchPosition t;
@@ -2567,6 +2813,7 @@ static void updatePlay(u32 kDown, u32 kHeld) {
     dbgDistWindow += dbgSpeedFrame;
 
     updateCamera();
+    checkTeleport();
 
     /* on recupere doucement des PV en se promenant */
     if (hero.hp < heroStat(ST_HP) && ++regenTimer >= 180) {
@@ -2610,25 +2857,51 @@ static bool stepRepeat(u32 kDown, u32 kHeld, u32 key, int *cnt) {
     return false;
 }
 
+static void enterZoneTools(void);
+
+static bool saveWorld(void) {
+    bool a = saveZone();
+    bool b = saveTeles();
+    return a && b;
+}
+
 static void updateEdit(u32 kDown, u32 kHeld) {
     static int rep[4] = { 0, 0, 0, 0 };
     int mx = 0, my = 0;
+    int nTool = tileCount + 1;   /* les blocs, plus l'outil teleporteur */
 
     if (editMsgTimer > 0)
         editMsgTimer--;
+    if (editTile > tileCount)
+        editTile = T_GRASS;
 
-    /* choix de la tuile */
-    if (editTile >= tileCount) editTile = 0;
-    if (kDown & KEY_L) editTile = (editTile + tileCount - 1) % tileCount;
-    if (kDown & KEY_R) editTile = (editTile + 1) % tileCount;
+    /* choix du bloc (le dernier de la liste est le teleporteur) */
+    if (kDown & KEY_L) {
+        editTile = (editTile + nTool - 1) % nTool;
+        if (editTile == tileCount)
+            editLink = teleSuggestLink();
+    }
+    if (kDown & KEY_R) {
+        editTile = (editTile + 1) % nTool;
+        if (editTile == tileCount)
+            editLink = teleSuggestLink();
+    }
 
-    /* defilement de la zone d'edition */
-    if (stepRepeat(kDown, kHeld, KEY_LEFT,  &rep[0])) mx = -1;
-    if (stepRepeat(kDown, kHeld, KEY_RIGHT, &rep[1])) mx =  1;
-    if (stepRepeat(kDown, kHeld, KEY_UP,    &rep[2])) my = -1;
-    if (stepRepeat(kDown, kHeld, KEY_DOWN,  &rep[3])) my =  1;
-    ecx += mx;
-    ecy += my;
+    if (kHeld & KEY_Y) {
+        /* Y + croix : numero de lien des teleporteurs */
+        if (kDown & KEY_UP)    editLink = editLink % MAX_LINK + 1;
+        if (kDown & KEY_DOWN)  editLink = (editLink + MAX_LINK - 2) % MAX_LINK + 1;
+        if (kDown & KEY_RIGHT) editLink = (editLink + 9) % MAX_LINK + 1;
+        if (kDown & KEY_LEFT)  editLink = (editLink - 11 + 2 * MAX_LINK) % MAX_LINK + 1;
+    } else {
+        /* defilement de la zone d'edition */
+        if (stepRepeat(kDown, kHeld, KEY_LEFT,  &rep[0])) mx = -1;
+        if (stepRepeat(kDown, kHeld, KEY_RIGHT, &rep[1])) mx =  1;
+        if (stepRepeat(kDown, kHeld, KEY_UP,    &rep[2])) my = -1;
+        if (stepRepeat(kDown, kHeld, KEY_DOWN,  &rep[3])) my =  1;
+        ecx += mx;
+        ecy += my;
+    }
     clampEditor();
 
     /* peinture au stylet (seulement si le contact a commence ici) */
@@ -2643,359 +2916,462 @@ static void updateEdit(u32 kDown, u32 kHeld) {
         tx = ecx + t.px / TS;
         ty = ecy + t.py / TS;
 
-        if (tx >= 0 && tx < MAP_W && ty >= 0 && ty < MAP_H) {
+        if (tx >= 0 && tx < mapW && ty >= 0 && ty < mapH) {
             if (kHeld & KEY_Y) {
                 spawnTX = tx;
                 spawnTY = ty;
+            } else if (editTile == tileCount) {
+                /* outil teleporteur : B + stylet l'enleve ; un seul appui = un teleporteur */
+                if (kHeld & KEY_B) {
+                    teleRemove(teleFind(curZone, tx, ty));
+                } else if (kDown & KEY_TOUCH) {
+                    if (!teleSet(curZone, tx, ty, editLink)) {
+                        editMsg = "Trop de téléporteurs (64 maximum)";
+                        editMsgTimer = 120;
+                    } else if (teleLinkCount(editLink) >= 2) {
+                        editLink = teleSuggestLink();   /* la paire est complete */
+                    }
+                }
             } else {
-                map[ty][tx] = (kHeld & KEY_B) ? (u8)T_GRASS : (u8)editTile;
+                MAP(tx, ty) = (kHeld & KEY_B) ? (u8)T_GRASS : (u8)editTile;
             }
         }
     }
 
     if (kDown & KEY_X) {
-        editMsg = saveMap() ? "Carte sauvegardée !" : "Erreur de sauvegarde (carte SD ?)";
-        editMsgTimer = 120;
+        saveWorld();
+        enterZoneTools();
+        return;
     }
 
     if (kDown & KEY_A) {
-        saveMap();
+        saveWorld();
         fromEditor = true;
         startPlay();
+        return;
     }
 
     if (kDown & KEY_SELECT) {
-        saveMap();
+        saveWorld();
         state = S_EDMENU;
     }
 }
 
-/* ---------- Editeur de blocs : creer des blocs et dessiner leurs textures ---------- */
+/* ---------- Mise a jour : editeur de blocs (textures) ---------- */
 
-static int blkSel = 0;          /* bloc modifie */
-static int blkColor = 13;       /* couleur choisie (numero de la palette) */
-static int blkTool = 0;         /* 0 crayon, 1 seau, 2 pipette */
-static int blkDelTimer = 0;     /* > 0 : on attend la confirmation de suppression */
-static bool blkPainting = false;
-static int calibReturn = S_EDMENU;
+#define TE_GX 6      /* grille de dessin : coin haut-gauche et taille d'un pixel */
+#define TE_GY 6
+#define TE_GC 10
+#define TE_PX 176    /* palette de couleurs */
+#define TE_PY 6
+#define TE_PC 17
 
-#define BK_CX    6      /* zone de dessin : position et taille d'un pixel */
-#define BK_CY    30
-#define BK_CELL  10
-#define BK_PX    172    /* palette de 32 couleurs */
-#define BK_PY    30
-#define BK_PITCH 18
+enum { TOOL_PENCIL, TOOL_FILL, TOOL_PICK };
+enum { TB_PENCIL, TB_FILL, TB_PICK, TB_SOLID, TB_WILD, TB_NAME, TB_UNDO, TB_DEL, TB_BACK,
+       TB_PREV, TB_NEXT, TB_NEW, TB_COPY, TB_N };
 
-static Button bkPrev = {   4,   4,  40, 22, "<", true };
-static Button bkNext = { 276,   4,  40, 22, ">", true };
-static Button bkName = {  48,   4, 224, 22, "",  true };
-static Button bkTools[3] = {
-    { 172, 106, 46, 24, "Crayon",  true },
-    { 221, 106, 46, 24, "Seau",    true },
-    { 270, 106, 46, 24, "Pipette", true },
+static Button teBtn[TB_N] = {
+    [TB_PENCIL] = { 176,  80,  44, 22, "Crayon",  true },
+    [TB_FILL]   = { 223,  80,  44, 22, "Pot",     true },
+    [TB_PICK]   = { 270,  80,  44, 22, "Pipette", true },
+    [TB_SOLID]  = { 176, 108, 138, 22, "Solide",  true },
+    [TB_WILD]   = { 176, 136, 138, 22, "Monstres", true },
+    [TB_NAME]   = { 176, 164,  66, 22, "Nom",     true },
+    [TB_UNDO]   = { 248, 164,  66, 22, "Annuler", true },
+    [TB_DEL]    = { 176, 192,  66, 22, "Suppr.",  true },
+    [TB_BACK]   = { 248, 192,  66, 22, "Retour",  true },
+    [TB_PREV]   = {   6, 176,  40, 22, "<",       true },
+    [TB_NEXT]   = { 126, 176,  40, 22, ">",       true },
+    [TB_NEW]    = {   6, 206,  76, 24, "Nouveau", true },
+    [TB_COPY]   = {  90, 206,  76, 24, "Copie",   true },
 };
-static Button bkSolid = { 172, 136, 144, 22, "", true };
-static Button bkTall  = { 172, 162, 144, 22, "", true };
-static Button bkNew   = {   6, 204,  74, 28, "Nouveau", true };
-static Button bkCopy  = {  84, 204,  74, 28, "Copier",  true };
-static Button bkDel   = { 162, 204,  74, 28, "Suppr.",  true };
-static Button bkBack  = { 240, 204,  74, 28, "Retour",  true };
 
-/* comme drawButton, avec une taille de texte au choix */
-static void drawButtonSc(const Button *b, bool selected, float sc) {
-    u32 border = selected ? COL(255, 220, 80) : COL(20, 20, 30);
-    u32 fill = b->enabled ? COL(60, 90, 160) : COL(70, 70, 80);
-    u32 txt = b->enabled ? COL(255, 255, 255) : COL(160, 160, 170);
+static int teSel = 0;                 /* bloc modifie */
+static int teColor = P_BLACK;         /* couleur choisie dans la palette */
+static int teTool = TOOL_PENCIL;
+static u8 teUndo[TS][TS];
+static bool teHasUndo = false;
+static bool teStroke = false;         /* le stylet dessine (contact commence dans la grille) */
+static int teDelTimer = 0;
+static const char *teMsg = "";
+static int teMsgTimer = 0;
 
-    C2D_DrawRectSolid(b->x - 3, b->y - 3, 0.0f, b->w + 6, b->h + 6, border);
-    C2D_DrawRectSolid(b->x, b->y, 0.1f, b->w, b->h, fill);
-    drawTextInRect(b->label, b->x, b->y, b->w, b->h, sc, txt);
+static void teSetMsg(const char *s) {
+    teMsg = s;
+    teMsgTimer = 150;
 }
 
-/* clavier de la console pour choisir un nom */
-static bool askText(char *text, size_t cap, const char *hint, int maxChars) {
-    SwkbdState swkbd;
-    SwkbdButton button;
-    char buf[NAME_BYTES];
-
-    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, maxChars);
-    swkbdSetInitialText(&swkbd, text);
-    swkbdSetHintText(&swkbd, hint);
-    swkbdSetButton(&swkbd, SWKBD_BUTTON_LEFT, "Annuler", false);
-    swkbdSetButton(&swkbd, SWKBD_BUTTON_RIGHT, "OK", true);
-    swkbdSetValidation(&swkbd, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
-
-    button = swkbdInputText(&swkbd, buf, sizeof buf);
-    if (button != SWKBD_BUTTON_RIGHT)
-        return false;
-    snprintf(text, cap, "%s", buf);
-    return true;
+static void teSelect(int i) {
+    teSel = ((i % tileCount) + tileCount) % tileCount;
+    teHasUndo = false;
+    teStroke = false;
+    teDelTimer = 0;
 }
 
-/* a appeler quand les pixels du bloc modifie ont change */
-static void blkChanged(void) {
-    tileRecolor(&tiles[blkSel]);
-    atlasWriteSlot(blkSel, &tiles[blkSel].pix[0][0]);
-    atlasDirty = true;
+static void enterTileEd(void) {
+    teSelect((editTile < tileCount) ? editTile : 0);
+    teColor = tiles[teSel].base;
+    teTool = TOOL_PENCIL;
+    teMsgTimer = 0;
+    state = S_TILEEDIT;
 }
 
-/* nouveau bloc : vide (src = NULL) ou copie d'un autre ; renvoie son numero ou -1 */
-static int tileNew(const Tile *src) {
-    Tile *t;
-    char nm[TILE_NAME];
-
-    if (tileCount >= MAX_TILES)
-        return -1;
-    t = &tiles[tileCount];
-    if (src != NULL) {
-        *t = *src;
-        snprintf(nm, sizeof nm, "Copie %d", tileCount + 1);
-    } else {
-        tileSet(t, "", false, false, blkColor);
-        snprintf(nm, sizeof nm, "Bloc %d", tileCount + 1);
-    }
-    snprintf(t->name, TILE_NAME, "%s", nm);
-    tileRecolor(t);
-    atlasWriteSlot(tileCount, &t->pix[0][0]);
-    atlasDirty = true;
-    return tileCount++;
+static void leaveTileEd(void) {
+    saveTiles();
+    state = S_EDMENU;
 }
 
-/* le seau : remplit la zone de meme couleur */
-static void floodFill(Tile *t, int sx, int sy, int newc) {
-    static const int D[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-    int stack[256];
-    int sp = 0;
-    int old = t->pix[sy][sx];
+/* pot de peinture : remplit les pixels voisins de la meme couleur */
+static void teFill(int x, int y, int c) {
+    Tile *t = &tiles[teSel];
+    int stack[TS * TS];
+    int sp = 0, target = t->px[y][x];
 
-    if (old == newc)
+    if (target == c)
         return;
-    t->pix[sy][sx] = (u8)newc;
-    stack[sp++] = sy * 16 + sx;
+    t->px[y][x] = (u8)c;
+    stack[sp++] = y * TS + x;
     while (sp > 0) {
         int p = stack[--sp];
-        int x = p % 16, y = p / 16, k;
+        int cx = p % TS, cy = p / TS, k;
+        static const int D[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+
         for (k = 0; k < 4; k++) {
-            int nx = x + D[k][0], ny = y + D[k][1];
-            if (nx < 0 || ny < 0 || nx > 15 || ny > 15)
+            int nx = cx + D[k][0], ny = cy + D[k][1];
+            if (nx < 0 || ny < 0 || nx >= TS || ny >= TS)
                 continue;
-            if (t->pix[ny][nx] != old)
+            if (t->px[ny][nx] != target)
                 continue;
-            t->pix[ny][nx] = (u8)newc;
-            stack[sp++] = ny * 16 + nx;
+            t->px[ny][nx] = (u8)c;
+            stack[sp++] = ny * TS + nx;
         }
     }
 }
 
-static void enterBlocks(void) {
-    loadOrDefault();   /* la carte en memoire doit etre celle de la carte SD */
-    if (blkSel >= tileCount)
-        blkSel = 0;
-    blkPainting = false;
-    blkDelTimer = 0;
-    state = S_BLOCKS;
-}
+static void teApply(int gx, int gy, bool fresh) {
+    Tile *t = &tiles[teSel];
 
-/* 0 <  1 >  2 nom  3-5 outils  6 solide  7 rencontres  8 nouveau  9 copier
- * 10 supprimer  11 retour  20-51 couleurs ; -1 si rien */
-static int hitTestBlk(int px, int py) {
-    int i, c, r;
-
-    if (inRect(&bkPrev, px, py)) return 0;
-    if (inRect(&bkNext, px, py)) return 1;
-    if (inRect(&bkName, px, py)) return 2;
-    for (i = 0; i < 3; i++)
-        if (inRect(&bkTools[i], px, py)) return 3 + i;
-    if (inRect(&bkSolid, px, py)) return 6;
-    if (inRect(&bkTall, px, py))  return 7;
-    if (inRect(&bkNew, px, py))   return 8;
-    if (inRect(&bkCopy, px, py))  return 9;
-    if (inRect(&bkDel, px, py))   return 10;
-    if (inRect(&bkBack, px, py))  return 11;
-
-    if (px >= BK_PX && py >= BK_PY) {
-        c = (px - BK_PX) / BK_PITCH;
-        r = (py - BK_PY) / BK_PITCH;
-        if (c < 8 && r < 4 && (px - BK_PX) % BK_PITCH < 16 && (py - BK_PY) % BK_PITCH < 16)
-            return 20 + r * 8 + c;
+    if (teTool == TOOL_PICK) {
+        if (fresh) {
+            teColor = t->px[gy][gx];
+            teTool = TOOL_PENCIL;
+        }
+        return;
     }
-    return -1;
+    if (fresh) {
+        memcpy(teUndo, t->px, sizeof teUndo);
+        teHasUndo = true;
+    }
+    if (teTool == TOOL_FILL) {
+        if (fresh)
+            teFill(gx, gy, teColor);
+    } else {
+        t->px[gy][gx] = (u8)teColor;
+    }
+    compileTile(t);
 }
 
-static void pressBlk(int id) {
-    Tile *t = &tiles[blkSel];
-    int n;
+static void teCreate(bool copy) {
+    Tile *t;
 
-    if (id != 10)
-        blkDelTimer = 0;
+    if (tileCount >= MAX_TILES) {
+        teSetMsg("Maximum : 32 blocs");
+        return;
+    }
+    t = &tiles[tileCount];
+    if (copy) {
+        *t = tiles[teSel];
+    } else {
+        memset(t, 0, sizeof *t);
+        pxFill(t, teColor);
+    }
+    snprintf(t->name, NAME_BYTES, "Bloc %d", tileCount - BASE_TILES + 1);
+    compileTile(t);
+    teSel = tileCount;
+    tileCount++;
+    teHasUndo = false;
+    teDelTimer = 0;
+    saveTiles();
+    teSetMsg(copy ? "Copie créée" : "Nouveau bloc créé");
+}
+
+static void teButton(int id) {
+    Tile *t = &tiles[teSel];
 
     switch (id) {
-    case 0:
-        blkSel = (blkSel + tileCount - 1) % tileCount;
+    case TB_PENCIL: teTool = TOOL_PENCIL; break;
+    case TB_FILL:   teTool = TOOL_FILL;   break;
+    case TB_PICK:   teTool = TOOL_PICK;   break;
+    case TB_SOLID:  t->solid = !t->solid; break;
+    case TB_WILD:   t->wild = !t->wild;   break;
+    case TB_NAME:
+        askName(t->name, NAME_BYTES);
         break;
-    case 1:
-        blkSel = (blkSel + 1) % tileCount;
-        break;
-    case 2:
-        if (askText(t->name, TILE_NAME, "Nom du bloc", 12))
-            tileRecolor(t);
-        break;
-    case 3:
-    case 4:
-    case 5:
-        blkTool = id - 3;
-        break;
-    case 6:
-        t->solid = !t->solid;
-        break;
-    case 7:
-        t->tall = !t->tall;
-        break;
-    case 8:
-        n = tileNew(NULL);
-        if (n >= 0)
-            blkSel = n;
-        break;
-    case 9:
-        n = tileNew(t);
-        if (n >= 0)
-            blkSel = n;
-        break;
-    case 10:
-        if (tileCount > 1) {
-            if (blkDelTimer > 0) {
-                tileDelete(blkSel);
-                if (blkSel >= tileCount)
-                    blkSel = tileCount - 1;
-                if (editTile >= tileCount)
-                    editTile = 0;
-                atlasRebuild();
-                blkDelTimer = 0;
-            } else {
-                blkDelTimer = 120;   /* il faut retoucher le bouton pour confirmer */
-            }
+    case TB_UNDO:
+        if (teHasUndo) {
+            u8 tmp[TS][TS];
+            memcpy(tmp, t->px, sizeof tmp);
+            memcpy(t->px, teUndo, sizeof tmp);
+            memcpy(teUndo, tmp, sizeof tmp);
+            compileTile(t);
         }
         break;
-    case 11:
-        saveTiles();
-        saveMap();
-        state = S_EDMENU;
+    case TB_PREV: teSelect(teSel - 1); break;
+    case TB_NEXT: teSelect(teSel + 1); break;
+    case TB_NEW:  teCreate(false);     break;
+    case TB_COPY: teCreate(true);      break;
+    case TB_DEL:
+        if (teDelTimer <= 0) {
+            teDelTimer = 120;   /* il faut retoucher le bouton pour confirmer */
+        } else if (teSel < BASE_TILES) {
+            defaultTile(teSel);
+            teDelTimer = 0;
+            teHasUndo = false;
+            saveTiles();
+            teSetMsg("Texture d'origine rétablie");
+        } else {
+            int id = teSel;
+
+            tileDelete(id);
+            if (editTile == id)
+                editTile = T_GRASS;
+            else if (editTile > id)
+                editTile--;
+            teSelect(id - 1);
+            saveTiles();
+            teSetMsg("Bloc supprimé (remplacé par de l'herbe)");
+        }
+        break;
+    case TB_BACK:
+        leaveTileEd();
         break;
     default:
-        if (id >= 20 && id <= 51)
-            blkColor = id - 20;
         break;
     }
 }
 
-/* le stylet touche la zone de dessin en (px, py) */
-static void blkApply(int px, int py, bool first) {
-    Tile *t = &tiles[blkSel];
-    int cx, cy;
+static void updateTileEd(u32 kDown, u32 kHeld) {
+    if (teMsgTimer > 0) teMsgTimer--;
+    if (teDelTimer > 0) teDelTimer--;
 
-    if (px < BK_CX || py < BK_CY)
+    if (kDown & KEY_L) teSelect(teSel - 1);
+    if (kDown & KEY_R) teSelect(teSel + 1);
+    if (kDown & KEY_B) {
+        leaveTileEd();
         return;
-    cx = (px - BK_CX) / BK_CELL;
-    cy = (py - BK_CY) / BK_CELL;
-    if (cx > 15 || cy > 15)
-        return;
-
-    if (blkTool == 0) {
-        if (t->pix[cy][cx] != blkColor) {
-            t->pix[cy][cx] = (u8)blkColor;
-            blkChanged();
-        }
-    } else if (blkTool == 1) {
-        if (first) {
-            floodFill(t, cx, cy, blkColor);
-            blkChanged();
-        }
-    } else if (first) {
-        blkColor = t->pix[cy][cx];   /* pipette : on reprend cette couleur */
-        blkTool = 0;
-    }
-}
-
-static void enterCalib(int ret) {
-    calibReturn = ret;
-    state = S_CALIB;
-}
-
-static void updateBlocks(u32 kDown, u32 kHeld) {
-    touchPosition t;
-
-    if (blkDelTimer > 0)
-        blkDelTimer--;
-
-    if (kDown & KEY_L) pressBlk(0);
-    if (kDown & KEY_R) pressBlk(1);
-    if (kDown & KEY_Y) {
-        enterCalib(S_BLOCKS);
-        return;
-    }
-    if (kDown & KEY_SELECT) {
-        pressBlk(11);
-        return;
-    }
-
-    if (kDown & KEY_TOUCH) {
-        int id;
-        hidTouchRead(&t);
-        id = hitTestBlk(t.px, t.py);
-        if (id >= 0) {
-            pressBlk(id);
-            blkPainting = false;
-        } else if (t.px >= BK_CX && t.px < BK_CX + 16 * BK_CELL &&
-                   t.py >= BK_CY && t.py < BK_CY + 16 * BK_CELL) {
-            blkPainting = true;
-            blkApply(t.px, t.py, true);
-        }
-    } else if ((kHeld & KEY_TOUCH) && blkPainting) {
-        hidTouchRead(&t);
-        blkApply(t.px, t.py, false);
     }
 
     if (!(kHeld & KEY_TOUCH))
-        blkPainting = false;
-}
+        teStroke = false;
 
-/* ---------- Reglage d'affichage des textures ---------- */
+    if (kHeld & KEY_TOUCH) {
+        touchPosition t;
+        int px, py;
 
-static Button caBtn[4] = {
-    { 6,  34, 308, 32, "", true },
-    { 6,  74, 308, 30, "", true },
-    { 6, 110, 308, 30, "", true },
-    { 6, 146, 308, 30, "", true },
-};
-static Button caOk = { 6, 192, 308, 38, "Terminé", true };
-
-static void updateCalib(u32 kDown) {
-    touchPosition t;
-    int i;
-
-    if (kDown & (KEY_B | KEY_SELECT)) {
-        saveDisplay();
-        state = calibReturn;
-        return;
-    }
-    if (kDown & KEY_TOUCH) {
         hidTouchRead(&t);
-        for (i = 0; i < 4; i++) {
-            if (!inRect(&caBtn[i], t.px, t.py))
-                continue;
-            if (i == 0) {
-                texMode = !texMode;
-            } else if (texMode == 0) {   /* ces trois reglages ne servent qu'au mode "carte graphique" */
-                if (i == 1)      texFlipV = !texFlipV;
-                else if (i == 2) texBswap = !texBswap;
-                else             texSwapXY = !texSwapXY;
-                atlasRebuild();
+        px = t.px;
+        py = t.py;
+
+        if (px >= TE_GX && px < TE_GX + TS * TE_GC && py >= TE_GY && py < TE_GY + TS * TE_GC) {
+            int gx = (px - TE_GX) / TE_GC, gy = (py - TE_GY) / TE_GC;
+
+            if (kDown & KEY_TOUCH) {
+                teApply(gx, gy, true);
+                teStroke = (teTool != TOOL_PICK);
+            } else if (teStroke && teTool == TOOL_PENCIL) {
+                teApply(gx, gy, false);
+            }
+        } else if (kDown & KEY_TOUCH) {
+            int i;
+
+            if (px >= TE_PX && px < TE_PX + 8 * TE_PC && py >= TE_PY && py < TE_PY + 4 * TE_PC) {
+                teColor = ((py - TE_PY) / TE_PC) * 8 + (px - TE_PX) / TE_PC;
+            } else {
+                for (i = 0; i < TB_N; i++) {
+                    if (inRect(&teBtn[i], px, py)) {
+                        if (i != TB_DEL)
+                            teDelTimer = 0;
+                        teButton(i);
+                        break;
+                    }
+                }
             }
         }
-        if (inRect(&caOk, t.px, t.py)) {
-            saveDisplay();
-            state = calibReturn;
+    }
+}
+
+/* ---------- Mise a jour : outils de zone (agrandir, nouvelle zone...) ---------- */
+
+enum { ZB_APPLY = 8, ZB_NEW, ZB_DEL, ZB_BACK, ZB_PREV, ZB_NEXT, ZB_N };
+
+static Button zBtn[ZB_N] = {
+    { 118,  44, 44, 28, "-", true }, { 214,  44, 44, 28, "+", true },
+    { 118,  78, 44, 28, "-", true }, { 214,  78, 44, 28, "+", true },
+    { 118, 112, 44, 28, "-", true }, { 214, 112, 44, 28, "+", true },
+    { 118, 146, 44, 28, "-", true }, { 214, 146, 44, 28, "+", true },
+    {  10, 184, 148, 24, "Appliquer",     true },
+    { 162, 184, 148, 24, "Nouvelle zone", true },
+    {  10, 212, 148, 24, "Suppr. zone",   true },
+    { 162, 212, 148, 24, "Retour",        true },
+    { 196,   6,  52, 26, "<", true },
+    { 258,   6,  52, 26, ">", true },
+};
+
+static const char *const ZSIDE[4] = { "Gauche", "Droite", "Haut", "Bas" };
+
+static int zDelta[4] = { 0, 0, 0, 0 };    /* colonnes/lignes a ajouter (ou retirer) : G, D, H, B */
+static int zHoldId = -1, zHoldCnt = 0;
+static int zDelTimer = 0;
+static const char *zMsg = "";
+static int zMsgTimer = 0;
+
+static void zSetMsg(const char *s) {
+    zMsg = s;
+    zMsgTimer = 150;
+}
+
+static void enterZoneTools(void) {
+    memset(zDelta, 0, sizeof zDelta);
+    zHoldId = -1;
+    zDelTimer = 0;
+    zMsgTimer = 0;
+    if (editTile >= tileCount)
+        editTile = T_GRASS;
+    state = S_ZONE;
+}
+
+static void leaveZoneTools(void) {
+    saveWorld();
+    edZone = curZone;
+    clampEditor();
+    painting = false;
+    state = S_EDIT;
+}
+
+static void zoneStep(int id) {
+    int side = id / 2, dir = (id % 2) ? 1 : -1;
+    int nw = mapW + zDelta[0] + zDelta[1];
+    int nh = mapH + zDelta[2] + zDelta[3];
+
+    if (side < 2) nw += dir; else nh += dir;
+    if (nw < ZMIN_W || nw > ZMAX_W || nh < ZMIN_H || nh > ZMAX_H)
+        return;
+    zDelta[side] += dir;
+}
+
+static void zoneSwitch(int z) {
+    if (z < 1 || z > zoneCount || z == curZone)
+        return;
+    saveWorld();
+    if (loadZone(z)) {
+        edZone = z;
+        memset(zDelta, 0, sizeof zDelta);
+        zDelTimer = 0;
+    } else {
+        loadZone(edZone);
+        zSetMsg("Zone illisible");
+    }
+}
+
+static void zoneButton(int id) {
+    if (id != ZB_DEL)
+        zDelTimer = 0;
+
+    switch (id) {
+    case ZB_APPLY:
+        if (zDelta[0] == 0 && zDelta[1] == 0 && zDelta[2] == 0 && zDelta[3] == 0) {
+            zSetMsg("Rien à changer");
+        } else if (resizeMap(zDelta[0], zDelta[1], zDelta[2], zDelta[3], editTile)) {
+            memset(zDelta, 0, sizeof zDelta);
+            saveWorld();
+            zSetMsg("Zone redimensionnée !");
+        } else {
+            zSetMsg("Taille impossible");
         }
+        break;
+    case ZB_NEW:
+        saveWorld();
+        if (newZone()) {
+            edZone = curZone;
+            memset(zDelta, 0, sizeof zDelta);
+            saveWorld();
+            zSetMsg("Nouvelle zone créée !");
+        } else {
+            zSetMsg("Maximum : 16 zones");
+        }
+        break;
+    case ZB_DEL:
+        if (zoneCount <= 1) {
+            zSetMsg("Impossible : il faut au moins une zone");
+        } else if (zDelTimer <= 0) {
+            zDelTimer = 120;   /* il faut retoucher le bouton pour confirmer */
+        } else {
+            zDelTimer = 0;
+            if (deleteZone(curZone)) {
+                edZone = curZone;
+                memset(zDelta, 0, sizeof zDelta);
+                zSetMsg("Zone supprimée");
+            }
+        }
+        break;
+    case ZB_BACK:
+        leaveZoneTools();
+        break;
+    case ZB_PREV:
+        zoneSwitch(curZone - 1);
+        break;
+    case ZB_NEXT:
+        zoneSwitch(curZone + 1);
+        break;
+    default:
+        break;
+    }
+}
+
+static void updateZone(u32 kDown, u32 kHeld) {
+    int id = -1, i;
+
+    if (zMsgTimer > 0) zMsgTimer--;
+    if (zDelTimer > 0) zDelTimer--;
+
+    /* L / R : bloc qui remplit les nouvelles cases */
+    if (kDown & KEY_L) editTile = (editTile + tileCount - 1) % tileCount;
+    if (kDown & KEY_R) editTile = (editTile + 1) % tileCount;
+    if (kDown & KEY_B) {
+        leaveZoneTools();
+        return;
+    }
+
+    if (kHeld & KEY_TOUCH) {
+        touchPosition t;
+
+        hidTouchRead(&t);
+        for (i = 0; i < ZB_N; i++) {
+            if (inRect(&zBtn[i], t.px, t.py)) {
+                id = i;
+                break;
+            }
+        }
+    }
+
+    if (id >= 0 && id < 8) {
+        /* + et - : un appui = 1 case, en gardant le doigt la repetition accelere */
+        bool fire = false;
+
+        if (id != zHoldId || (kDown & KEY_TOUCH)) {
+            zHoldId = id;
+            zHoldCnt = 0;
+            fire = true;
+        } else {
+            zHoldCnt++;
+            fire = (zHoldCnt > 15 && zHoldCnt % 3 == 0);
+        }
+        if (fire)
+            zoneStep(id);
+    } else {
+        zHoldId = -1;
+        if (id >= 8 && (kDown & KEY_TOUCH))
+            zoneButton(id);
     }
 }
 
@@ -3294,7 +3670,7 @@ static void drawTitleTop(void) {
     drawTextCX("RPG 2DS", TOP_W / 2, 30, 1.6f, COL(255, 255, 255));
     drawTextCX("Petit RPG avec éditeur intégré", TOP_W / 2, 105, 0.6f,
                COL(200, 210, 255));
-    drawTextCX("Étape 6 : inventaire et équipement", TOP_W / 2, 130, 0.5f,
+    drawTextCX("Étape 7 : blocs, zones et téléporteurs", TOP_W / 2, 130, 0.5f,
                COL(150, 160, 190));
 }
 
@@ -3308,7 +3684,99 @@ static void drawTitleBottom(void) {
                COL(170, 170, 190));
 }
 
+/* ---------- Dessin : mini-cartes et teleporteurs ---------- */
+
+/* mini-carte : chaque case dessinee mesure s pixels et represente k x k tuiles
+   (les grandes zones sont resumees pour garder un dessin rapide) */
+typedef struct { int x0, y0, k, s, cw, ch; } Ov;
+
+static Ov ovLayout(int x0, int y0, int w, int h) {
+    Ov o;
+
+    o.x0 = x0;
+    o.y0 = y0;
+    o.k = 1;
+    for (;;) {
+        o.cw = (mapW + o.k - 1) / o.k;
+        o.ch = (mapH + o.k - 1) / o.k;
+        if ((o.cw * 2 <= w && o.ch * 2 <= h && o.cw * o.ch <= 2000) || o.k >= 16)
+            break;
+        o.k++;
+    }
+    o.s = w / o.cw;
+    if (h / o.ch < o.s)
+        o.s = h / o.ch;
+    if (o.s < 1)
+        o.s = 1;
+    return o;
+}
+
+static float ovX(const Ov *o, float tx) { return (float)o->x0 + tx * o->s / o->k; }
+static float ovY(const Ov *o, float ty) { return (float)o->y0 + ty * o->s / o->k; }
+
+static void ovDraw(const Ov *o) {
+    int cx, cy;
+
+    C2D_DrawRectSolid((float)(o->x0 - 2), (float)(o->y0 - 2), 0.0f,
+                      (float)(o->cw * o->s + 4), (float)(o->ch * o->s + 4), COL(255, 255, 255));
+    for (cy = 0; cy < o->ch; cy++) {
+        for (cx = 0; cx < o->cw; cx++) {
+            int t = MAP(cx * o->k, cy * o->k);
+            C2D_DrawRectSolid((float)(o->x0 + cx * o->s), (float)(o->y0 + cy * o->s), 0.05f,
+                              (float)o->s, (float)o->s, palCol[tiles[t].base]);
+        }
+    }
+}
+
+/* un teleporteur dans l'editeur : violet s'il a un jumeau, orange sinon */
+static u32 teleColor(int link) {
+    return (teleLinkCount(link) >= 2) ? COL(140, 60, 220) : COL(235, 130, 30);
+}
+
+static void ovTeles(const Ov *o) {
+    float ts = (float)o->s / o->k;
+    int i;
+
+    if (ts < 2.0f)
+        ts = 2.0f;
+    for (i = 0; i < teleCount; i++) {
+        if (teles[i].zone != curZone)
+            continue;
+        C2D_DrawRectSolid(ovX(o, (float)teles[i].x) - 1, ovY(o, (float)teles[i].y) - 1, 0.15f,
+                          ts + 2, ts + 2, COL(255, 255, 255));
+        C2D_DrawRectSolid(ovX(o, (float)teles[i].x), ovY(o, (float)teles[i].y), 0.16f,
+                          ts, ts, teleColor(teles[i].link));
+    }
+}
+
+/* la marque d'un teleporteur sur une case de 16 x 16 (editeur seulement) */
+static void drawTeleMark(float sx, float sy, int link) {
+    char buf[8];
+
+    C2D_DrawRectSolid(sx + 1, sy + 1, 0.3f, 14, 14, COL(255, 255, 255));
+    C2D_DrawRectSolid(sx + 2, sy + 2, 0.31f, 12, 12, teleColor(link));
+    snprintf(buf, sizeof buf, "%d", link);
+    drawTextCX(buf, sx + 8, sy + 1, 0.36f, COL(255, 255, 255));
+}
+
 /* ---------- Dessin : jeu ---------- */
+
+static void drawMapTop(void) {
+    int tx0 = camX / TS;
+    int ty0 = camY / TS;
+    int tx1 = (camX + TOP_W - 1) / TS;
+    int ty1 = (camY + TOP_H - 1) / TS;
+    int tx, ty;
+
+    if (tx1 >= mapW) tx1 = mapW - 1;
+    if (ty1 >= mapH) ty1 = mapH - 1;
+
+    /* les teleporteurs ne sont volontairement jamais dessines en jeu */
+    for (ty = ty0; ty <= ty1; ty++) {
+        for (tx = tx0; tx <= tx1; tx++)
+            drawTile(MAP(tx, ty), (float)(tx * TS - camX), (float)(ty * TS - camY), 1.0f, 0.0f);
+    }
+}
 
 static void drawMonsterArt(int shape, int colorIdx, float x, float y, float px);
 
@@ -3355,29 +3823,42 @@ static void drawPlayerTop(void) {
     C2D_DrawRectSolid(ix, iy, 0.22f, 3, 3, COL(255, 255, 255));
 }
 
-/* petit cadre en haut a gauche : FPS et vitesse */
+/* largeur d'un texte en pixels (pour ajuster les cadres au contenu) */
+static float textWidth(const char *s, float sc) {
+    C2D_Text t;
+    float tw, th;
+
+    C2D_TextParse(&t, g_textBuf, s);
+    C2D_TextOptimize(&t);
+    C2D_TextGetDimensions(&t, sc, sc, &tw, &th);
+    return tw;
+}
+
+/* petit cadre en haut a gauche : FPS et vitesse (la largeur suit le texte) */
 static void drawDebugOverlay(void) {
-    char buf[48];
+    char l1[48], l2[48], l3[48], l4[64];
     int sf10 = (int)(dbgSpeedFrame * 10.0f + 0.5f);
+    float w, w2;
 
-    C2D_DrawRectSolid(4, 4, 0.4f, 150, 56, C2D_Color32(0, 0, 0, 150));
+    snprintf(l1, sizeof l1, "FPS : %d", dbgFps);
+    snprintf(l2, sizeof l2, "Vitesse : %d px/s", (int)(dbgSpeedPxS + 0.5f));
+    snprintf(l3, sizeof l3, "(%d.%d px/image)", sf10 / 10, sf10 % 10);
+    snprintf(l4, sizeof l4, "Sauvages : %d   Rencontres : %d", wildCount(), encounters);
 
-    snprintf(buf, sizeof buf, "FPS : %d", dbgFps);
-    drawText(buf, 8, 6, 0.45f, COL(255, 255, 255));
+    w = textWidth(l4, 0.4f);
+    w2 = textWidth(l2, 0.45f);
+    if (w2 > w)
+        w = w2;
+    C2D_DrawRectSolid(4, 4, 0.4f, w + 12, 56, C2D_Color32(0, 0, 0, 150));
 
-    snprintf(buf, sizeof buf, "Vitesse : %d px/s", (int)(dbgSpeedPxS + 0.5f));
-    drawText(buf, 8, 20, 0.45f, COL(255, 220, 80));
-
-    snprintf(buf, sizeof buf, "          %d.%d px/image", sf10 / 10, sf10 % 10);
-    drawText(buf, 8, 32, 0.4f, COL(170, 170, 190));
-
-    snprintf(buf, sizeof buf, "Sauvages : %d   Rencontres : %d", wildCount(), encounters);
-    drawText(buf, 8, 44, 0.4f, COL(170, 170, 190));
+    drawText(l1, 8, 6, 0.45f, COL(255, 255, 255));
+    drawText(l2, 8, 20, 0.45f, COL(255, 220, 80));
+    drawText(l3, 8, 32, 0.4f, COL(170, 170, 190));
+    drawText(l4, 8, 44, 0.4f, COL(170, 170, 190));
 }
 
 static void drawPlayBottom(void) {
-    const int MX = 10, MY = 10, MS = 4; /* mini-carte : position et echelle */
-    int tx, ty;
+    Ov o = ovLayout(10, 10, 200, 124);   /* mini-carte */
     float vx, vy, vw, vh, px, py;
     char buf[64];
     u32 white = COL(255, 255, 255);
@@ -3385,18 +3866,16 @@ static void drawPlayBottom(void) {
     int cx = (player.x + PW / 2) / TS;
     int cy = (player.y + PH / 2) / TS;
 
-    /* mini-carte */
-    C2D_DrawRectSolid(MX - 2, MY - 2, 0.0f, MAP_W * MS + 4, MAP_H * MS + 4, white);
-    for (ty = 0; ty < MAP_H; ty++)
-        for (tx = 0; tx < MAP_W; tx++)
-            C2D_DrawRectSolid(MX + tx * MS, MY + ty * MS, 0.05f, MS, MS,
-                              TILES[map[ty][tx]].color);
+    if (cx >= mapW) cx = mapW - 1;
+    if (cy >= mapH) cy = mapH - 1;
+
+    ovDraw(&o);
 
     /* zone visible sur l'ecran du haut */
-    vx = MX + camX * (float)MS / TS;
-    vy = MY + camY * (float)MS / TS;
-    vw = TOP_W * (float)MS / TS;
-    vh = TOP_H * (float)MS / TS;
+    vx = ovX(&o, (float)camX / TS);
+    vy = ovY(&o, (float)camY / TS);
+    vw = (float)(TOP_W / TS) * o.s / o.k;
+    vh = (float)(TOP_H / TS) * o.s / o.k;
     C2D_DrawRectSolid(vx, vy, 0.1f, vw, 1, white);
     C2D_DrawRectSolid(vx, vy + vh - 1, 0.1f, vw, 1, white);
     C2D_DrawRectSolid(vx, vy, 0.1f, 1, vh, white);
@@ -3407,15 +3886,15 @@ static void drawPlayBottom(void) {
         int k;
         for (k = 0; k < MAX_WILD; k++) {
             if (wild[k].active)
-                C2D_DrawRectSolid(MX + (wild[k].x + TS / 2) * (float)MS / TS - 1,
-                                  MY + (wild[k].y + TS / 2) * (float)MS / TS - 1,
+                C2D_DrawRectSolid(ovX(&o, (float)(wild[k].x + TS / 2) / TS) - 1,
+                                  ovY(&o, (float)(wild[k].y + TS / 2) / TS) - 1,
                                   0.15f, 3, 3, COL(255, 220, 80));
         }
     }
 
     /* joueur */
-    px = MX + (player.x + PW / 2) * (float)MS / TS;
-    py = MY + (player.y + PH / 2) * (float)MS / TS;
+    px = ovX(&o, (float)(player.x + PW / 2) / TS);
+    py = ovY(&o, (float)(player.y + PH / 2) / TS);
     C2D_DrawRectSolid(px - 1, py - 1, 0.2f, 3, 3, COL(255, 0, 0));
 
     /* boutons */
@@ -3426,9 +3905,10 @@ static void drawPlayBottom(void) {
     snprintf(buf, sizeof buf, "%s niv. %d   PV %d/%d", classes[hero.cls].name,
              hero.level, hero.hp, heroStat(ST_HP));
     drawText(buf, 10, 140, 0.5f, white);
-    snprintf(buf, sizeof buf, "XP %d/%d   Pos %d,%d", hero.xp, xpNeed(hero.level), cx, cy);
+    snprintf(buf, sizeof buf, "XP %d/%d   Zone %d  Pos %d,%d", hero.xp, xpNeed(hero.level),
+             curZone, cx, cy);
     drawText(buf, 10, 156, 0.5f, white);
-    snprintf(buf, sizeof buf, "Sur : %s", TILES[map[cy][cx]].name);
+    snprintf(buf, sizeof buf, "Sur : %s", tiles[MAP(cx, cy)].name);
     drawText(buf, 10, 172, 0.5f, gray);
     drawText("Stick : bouger  B : courir  X : sac", 10, 188, 0.5f, gray);
     drawText(fromEditor ? "SELECT : éditeur    START : quitter"
@@ -3440,18 +3920,25 @@ static void drawPlayBottom(void) {
 
 /* ecran du bas : la zone qu'on modifie au stylet */
 static void drawEditBottom(void) {
-    int x, y;
+    int x, y, i;
     u32 grid = C2D_Color32(0, 0, 0, 60);
 
     for (y = 0; y < VIEW_H; y++)
         for (x = 0; x < VIEW_W; x++)
-            drawTile(map[ecy + y][ecx + x], (float)(x * TS), (float)(y * TS), 0.0f, 1.0f);
+            drawTile(MAP(ecx + x, ecy + y), (float)(x * TS), (float)(y * TS), 1.0f, 0.0f);
 
     /* grille */
     for (x = 1; x < VIEW_W; x++)
         C2D_DrawRectSolid((float)(x * TS), 0, 0.1f, 1, BOT_H, grid);
     for (y = 1; y < VIEW_H; y++)
         C2D_DrawRectSolid(0, (float)(y * TS), 0.1f, BOT_W, 1, grid);
+
+    /* teleporteurs (visibles uniquement dans l'editeur) */
+    for (i = 0; i < teleCount; i++) {
+        int tx = teles[i].x - ecx, ty = teles[i].y - ecy;
+        if (teles[i].zone == curZone && tx >= 0 && tx < VIEW_W && ty >= 0 && ty < VIEW_H)
+            drawTeleMark((float)(tx * TS), (float)(ty * TS), teles[i].link);
+    }
 
     /* point de depart */
     if (spawnTX >= ecx && spawnTX < ecx + VIEW_W &&
@@ -3463,247 +3950,321 @@ static void drawEditBottom(void) {
     }
 }
 
-/* ecran du haut : la carte entiere, la palette et l'aide */
+/* ecran du haut : la zone entiere, la palette de blocs et l'aide */
 static void drawEditTop(void) {
-    const int OX = 10, OY = 10, OS = 5;   /* carte entiere : position et echelle */
     const char *help[] = {
         "Stylet : peindre",
         "L / R : bloc",
         "B + stylet : gomme",
         "Y + stylet : départ",
+        "Y + croix : n° lien",
         "Croix : défiler",
+        "X : zones",
         "A : tester",
-        "X : sauver",
         "SELECT : menu",
         "START : quitter",
     };
+    Ov o = ovLayout(10, 10, 250, 150);
     u32 white = COL(255, 255, 255);
     u32 gray = COL(170, 170, 190);
     u32 yellow = COL(255, 220, 80);
     char buf[96];
-    int i, tx, ty, shown, first;
+    int i;
     float vx, vy, vw, vh;
 
-    /* carte entiere */
-    C2D_DrawRectSolid(OX - 2, OY - 2, 0.0f, MAP_W * OS + 4, MAP_H * OS + 4, white);
-    for (ty = 0; ty < MAP_H; ty++)
-        for (tx = 0; tx < MAP_W; tx++)
-            C2D_DrawRectSolid(OX + tx * OS, OY + ty * OS, 0.05f, OS, OS,
-                              TILES[map[ty][tx]].color);
+    /* zone entiere */
+    ovDraw(&o);
+    ovTeles(&o);
 
-    /* zone affichee sur l'ecran du bas */
-    vx = (float)(OX + ecx * OS);
-    vy = (float)(OY + ecy * OS);
-    vw = (float)(VIEW_W * OS);
-    vh = (float)(VIEW_H * OS);
+    /* partie affichee sur l'ecran du bas */
+    vx = ovX(&o, (float)ecx);
+    vy = ovY(&o, (float)ecy);
+    vw = (float)VIEW_W * o.s / o.k;
+    vh = (float)VIEW_H * o.s / o.k;
     C2D_DrawRectSolid(vx, vy, 0.1f, vw, 2, yellow);
     C2D_DrawRectSolid(vx, vy + vh - 2, 0.1f, vw, 2, yellow);
     C2D_DrawRectSolid(vx, vy, 0.1f, 2, vh, yellow);
     C2D_DrawRectSolid(vx + vw - 2, vy, 0.1f, 2, vh, yellow);
 
     /* point de depart */
-    C2D_DrawRectSolid((float)(OX + spawnTX * OS - 1), (float)(OY + spawnTY * OS - 1),
-                      0.2f, OS + 2, OS + 2, COL(255, 255, 255));
-    C2D_DrawRectSolid((float)(OX + spawnTX * OS), (float)(OY + spawnTY * OS),
-                      0.21f, OS, OS, COL(220, 60, 60));
+    {
+        float ts = (float)o.s / o.k;
+        if (ts < 3.0f)
+            ts = 3.0f;
+        C2D_DrawRectSolid(ovX(&o, (float)spawnTX) - 1, ovY(&o, (float)spawnTY) - 1,
+                          0.2f, ts + 2, ts + 2, white);
+        C2D_DrawRectSolid(ovX(&o, (float)spawnTX), ovY(&o, (float)spawnTY),
+                          0.21f, ts, ts, COL(220, 60, 60));
+    }
 
     /* aide */
-    for (i = 0; i < 9; i++)
+    for (i = 0; i < 10; i++)
         drawText(help[i], 268, 10.0f + i * 14, 0.4f, gray);
 
-    /* palette : 9 blocs visibles, le bloc choisi reste au milieu */
-    if (editTile >= tileCount)
-        editTile = 0;
-    shown = (tileCount < 9) ? tileCount : 9;
-    first = editTile - 4;
-    if (first > tileCount - shown)
-        first = tileCount - shown;
-    if (first < 0)
-        first = 0;
-    for (i = 0; i < shown; i++) {
-        int idx = first + i;
-        float bx = 10.0f + i * 36;
-        float by = 168.0f;
-        if (idx == editTile)
-            C2D_DrawRectSolid(bx - 3, by - 3, 0.0f, 38, 38, yellow);
-        C2D_DrawRectSolid(bx, by, 0.02f, 32, 32, COL(20, 20, 30));
-        drawTile(idx, bx, by, 0.1f, 2.0f);
+    /* palette : tous les blocs, puis le teleporteur */
+    for (i = 0; i <= tileCount; i++) {
+        float bx = 6.0f + (i % 18) * 22;
+        float by = 168.0f + (i / 18) * 22;
+
+        if (i == editTile)
+            C2D_DrawRectSolid(bx - 2, by - 2, 0.0f, 20, 20, yellow);
+        if (i < tileCount) {
+            drawTile(i, bx, by, 1.0f, 0.02f);
+        } else {
+            C2D_DrawRectSolid(bx, by, 0.02f, 16, 16, teleColor(editLink));
+            drawTextCX("T", bx + 8, by + 1, 0.45f, white);
+        }
     }
-    snprintf(buf, sizeof buf, "%s - %s%s   (%d/%d)", TILES[editTile].name,
-             TILES[editTile].solid ? "bloque" : "traversable",
-             TILES[editTile].tall ? ", rencontres" : "", editTile + 1, tileCount);
-    drawText(buf, 10, 208, 0.45f, white);
+
+    /* info sur le bloc choisi */
+    if (editTile < tileCount) {
+        drawText(tiles[editTile].name, 10, 214, 0.5f, white);
+        snprintf(buf, sizeof buf, "%s%s", tiles[editTile].solid ? "Bloque le joueur" : "Traversable",
+                 tiles[editTile].wild ? " - monstres sauvages" : "");
+        drawText(buf, 150, 216, 0.4f, gray);
+    } else {
+        int n = teleLinkCount(editLink);
+        snprintf(buf, sizeof buf, "Téléporteur : lien %d", editLink);
+        drawText(buf, 10, 214, 0.5f, white);
+        if (n == 0)
+            snprintf(buf, sizeof buf, "Libre : pose-en un ici, puis le jumeau (même n°)");
+        else if (n == 1)
+            snprintf(buf, sizeof buf, "1 sortie : pose le jumeau (même n°)");
+        else
+            snprintf(buf, sizeof buf, "%d sorties reliées en anneau", n);
+        drawText(buf, 10, 230, 0.4f, gray);
+    }
 
     if (editMsgTimer > 0)
-        drawText(editMsg, 10, 224, 0.5f, yellow);
+        drawText(editMsg, 220, 226, 0.45f, yellow);
 }
 
 /* ---------- Dessin : editeur de blocs ---------- */
 
-static void drawBlocksTop(void) {
-    const Tile *t = &tiles[blkSel];
+static void drawTileEdBottom(void) {
+    const Tile *t = &tiles[teSel];
     u32 white = COL(255, 255, 255);
     u32 gray = COL(170, 170, 190);
-    u32 yellow = COL(255, 220, 80);
-    char buf[64];
-    int i, j;
-
-    /* grand apercu */
-    C2D_DrawRectSolid(8, 8, 0.0f, 100, 100, COL(35, 45, 80));
-    drawTile(blkSel, 10, 10, 0.3f, 6.0f);
-
-    /* le meme bloc repete 3 x 3 : pratique pour voir si la texture se raccorde bien */
-    C2D_DrawRectSolid(122, 10, 0.0f, 100, 100, COL(35, 45, 80));
-    for (j = 0; j < 3; j++)
-        for (i = 0; i < 3; i++)
-            drawTile(blkSel, 124.0f + i * 32, 12.0f + j * 32, 0.3f, 2.0f);
-
-    /* informations */
-    drawText(t->name, 232, 10, 0.6f, white);
-    snprintf(buf, sizeof buf, "Bloc %d / %d", blkSel + 1, tileCount);
-    drawText(buf, 232, 36, 0.45f, gray);
-    drawText(t->solid ? "Solide : oui" : "Solide : non", 232, 56, 0.45f,
-             t->solid ? yellow : gray);
-    drawText(t->tall ? "Rencontres : oui" : "Rencontres : non", 232, 72, 0.45f,
-             t->tall ? yellow : gray);
-
-    /* tous les blocs */
-    drawText("Tes blocs", 10, 116, 0.45f, gray);
-    for (i = 0; i < tileCount; i++) {
-        float x = 10.0f + (i % 16) * 23;
-        float y = 134.0f + (i / 16) * 26;
-        if (i == blkSel)
-            C2D_DrawRectSolid(x - 2, y - 2, 0.0f, 20, 20, yellow);
-        drawTile(i, x, y, 0.3f, 1.0f);
-    }
-
-    drawText("Stylet : dessiner     L / R : autre bloc", 10, 192, 0.42f, gray);
-    drawText("Y : réglage d'affichage (si les textures sont fausses)", 10, 207, 0.42f, gray);
-    drawText("SELECT : retour", 10, 222, 0.42f, gray);
-}
-
-static void drawBlocksBottom(void) {
-    const Tile *t = &tiles[blkSel];
-    u32 white = COL(255, 255, 255);
     u32 yellow = COL(255, 220, 80);
     u32 grid = C2D_Color32(0, 0, 0, 70);
-    Button b;
-    int i, x, y;
+    char buf[64];
+    int x, y, i;
 
-    /* en-tete : choix du bloc et nom */
-    drawButton(&bkPrev, false);
-    drawButton(&bkNext, false);
-    b = bkName;
-    b.label = t->name;
-    drawButtonSc(&b, false, 0.55f);
-
-    /* zone de dessin : 16 x 16 pixels */
-    C2D_DrawRectSolid(BK_CX - 2, BK_CY - 2, 0.0f, 16 * BK_CELL + 4, 16 * BK_CELL + 4, white);
-    for (y = 0; y < 16; y++)
-        for (x = 0; x < 16; x++)
-            C2D_DrawRectSolid((float)(BK_CX + x * BK_CELL), (float)(BK_CY + y * BK_CELL),
-                              0.05f, BK_CELL, BK_CELL, palCol(t->pix[y][x]));
-    for (i = 1; i < 16; i++) {
-        C2D_DrawRectSolid((float)(BK_CX + i * BK_CELL), BK_CY, 0.1f, 1, 16 * BK_CELL, grid);
-        C2D_DrawRectSolid(BK_CX, (float)(BK_CY + i * BK_CELL), 0.1f, 16 * BK_CELL, 1, grid);
+    /* grille de dessin */
+    C2D_DrawRectSolid(TE_GX - 2, TE_GY - 2, 0.0f, TS * TE_GC + 4, TS * TE_GC + 4, white);
+    for (y = 0; y < TS; y++)
+        for (x = 0; x < TS; x++)
+            C2D_DrawRectSolid((float)(TE_GX + x * TE_GC), (float)(TE_GY + y * TE_GC), 0.05f,
+                              TE_GC, TE_GC, palCol[t->px[y][x]]);
+    for (i = 1; i < TS; i++) {
+        C2D_DrawRectSolid((float)(TE_GX + i * TE_GC), TE_GY, 0.1f, 1, TS * TE_GC, grid);
+        C2D_DrawRectSolid(TE_GX, (float)(TE_GY + i * TE_GC), 0.1f, TS * TE_GC, 1, grid);
     }
 
-    /* palette de couleurs */
-    for (i = 0; i < 32; i++) {
-        float px = (float)(BK_PX + (i % 8) * BK_PITCH);
-        float py = (float)(BK_PY + (i / 8) * BK_PITCH);
-        if (i == blkColor)
-            C2D_DrawRectSolid(px - 2, py - 2, 0.0f, 20, 20, yellow);
-        C2D_DrawRectSolid(px, py, 0.05f, 16, 16, palCol(i));
+    /* palette */
+    for (i = 0; i < PAL_N; i++) {
+        float bx = (float)(TE_PX + (i % 8) * TE_PC);
+        float by = (float)(TE_PY + (i / 8) * TE_PC);
+        if (i == teColor)
+            C2D_DrawRectSolid(bx - 1, by - 1, 0.05f, TE_PC + 1, TE_PC + 1, yellow);
+        C2D_DrawRectSolid(bx, by, 0.1f, TE_PC - 2, TE_PC - 2, palCol[i]);
     }
 
-    /* outils */
-    for (i = 0; i < 3; i++)
-        drawButtonSc(&bkTools[i], blkTool == i, 0.38f);
+    /* boutons */
+    for (i = 0; i < TB_N; i++) {
+        Button b = teBtn[i];
+        bool selected = false;
 
-    /* proprietes du bloc */
-    b = bkSolid;
-    b.label = t->solid ? "Solide : oui" : "Solide : non";
-    drawButtonSc(&b, t->solid, 0.5f);
-    b = bkTall;
-    b.label = t->tall ? "Rencontres : oui" : "Rencontres : non";
-    drawButtonSc(&b, t->tall, 0.5f);
+        if (i == TB_PENCIL || i == TB_FILL || i == TB_PICK)
+            selected = (teTool == i - TB_PENCIL);
+        else if (i == TB_SOLID)
+            b.label = t->solid ? "Solide : oui" : "Solide : non";
+        else if (i == TB_WILD)
+            b.label = t->wild ? "Monstres : oui" : "Monstres : non";
+        else if (i == TB_DEL) {
+            if (teDelTimer > 0) {
+                b.label = "Sûr ?";
+                selected = true;
+            } else {
+                b.label = (teSel < BASE_TILES) ? "Réinit." : "Suppr.";
+            }
+        } else if (i == TB_UNDO) {
+            b.enabled = teHasUndo;
+        }
+        drawButtonSc(&b, selected, 0.45f);
+    }
 
-    /* boutons du bas */
-    b = bkNew;
-    b.enabled = (tileCount < MAX_TILES);
-    drawButtonSc(&b, false, 0.5f);
-    b = bkCopy;
-    b.enabled = (tileCount < MAX_TILES);
-    drawButtonSc(&b, false, 0.5f);
-    b = bkDel;
-    b.enabled = (tileCount > 1);
-    b.label = (blkDelTimer > 0) ? "Sûr ?" : "Suppr.";
-    drawButtonSc(&b, blkDelTimer > 0, 0.5f);
-    drawButtonSc(&bkBack, false, 0.5f);
+    snprintf(buf, sizeof buf, "%d / %d", teSel + 1, tileCount);
+    drawTextCX(buf, 86, 179, 0.5f, white);
+
+    if (teMsgTimer > 0)
+        drawText(teMsg, 176, 220, 0.4f, yellow);
+    else
+        drawText("Touche la grille pour dessiner", 176, 220, 0.4f, gray);
 }
 
-/* ---------- Dessin : reglage d'affichage ---------- */
-
-static void drawCalibTop(void) {
+static void drawTileEdTop(void) {
+    const Tile *t = &tiles[teSel];
     u32 white = COL(255, 255, 255);
     u32 gray = COL(170, 170, 190);
+    u32 yellow = COL(255, 220, 80);
+    char buf[96];
+    int i, x, y;
+    const char *rating;
+    u32 ratingCol;
 
-    drawTextCX("Réglage d'affichage des textures", TOP_W / 2, 4, 0.6f, white);
+    /* grand apercu */
+    C2D_DrawRectSolid(10, 10, 0.0f, 132, 132, white);
+    drawTile(teSel, 12, 12, 8.0f, 0.02f);
 
-    /* a gauche : la reference (toujours juste) ; a droite : le rendu de la carte graphique */
-    drawText("Référence", 18, 30, 0.45f, gray);
-    C2D_DrawRectSolid(14, 50, 0.0f, 136, 136, COL(70, 70, 85));
-    drawTileRects(&testTile, 18, 54, 0.3f, 8.0f);
+    /* le bloc repete 3 x 3, comme sur la carte (en double taille) */
+    C2D_DrawRectSolid(158, 10, 0.0f, 100, 100, white);
+    for (y = 0; y < 3; y++)
+        for (x = 0; x < 3; x++)
+            drawTile(teSel, (float)(160 + x * 32), (float)(12 + y * 32), 2.0f, 0.02f);
 
-    drawText("Rendu carte graphique", 214, 30, 0.45f, gray);
-    C2D_DrawRectSolid(210, 50, 0.0f, 136, 136, COL(70, 70, 85));
-    if (!drawSlotGPU(TEST_SLOT, 214, 54, 0.3f, 8.0f))
-        drawText("indisponible", 232, 110, 0.5f, gray);
+    /* aide */
+    drawText("Stylet : dessiner", 268, 10, 0.4f, gray);
+    drawText("L / R : autre bloc", 268, 24, 0.4f, gray);
+    drawText("B : retour", 268, 38, 0.4f, gray);
+    drawText("START : quitter", 268, 52, 0.4f, gray);
 
-    drawText("Le mode « Rectangles » marche toujours. Pour essayer le mode", 10, 196, 0.4f, gray);
-    drawText("« Carte graphique » : le carré de droite doit être identique à", 10, 210, 0.4f, gray);
-    drawText("celui de gauche (touche les réglages jusqu'à y arriver).", 10, 224, 0.4f, gray);
+    /* tous les blocs */
+    for (i = 0; i < tileCount; i++) {
+        float bx = 8.0f + (i % 16) * 24;
+        float by = 150.0f + (i / 16) * 24;
+        if (i == teSel)
+            C2D_DrawRectSolid(bx - 2, by - 2, 0.0f, 20, 20, yellow);
+        drawTile(i, bx, by, 1.0f, 0.02f);
+    }
+
+    /* infos */
+    drawText(t->name, 10, 198, 0.55f, white);
+    snprintf(buf, sizeof buf, "%s - %s - %s", (teSel < BASE_TILES) ? "Bloc d'origine" : "Bloc perso",
+             t->solid ? "bloque le joueur" : "traversable",
+             t->wild ? "monstres sauvages" : "sans monstres");
+    drawText(buf, 10, 218, 0.4f, gray);
+
+    if (t->nRuns <= 12) {
+        rating = "léger";
+        ratingCol = COL(120, 220, 120);
+    } else if (t->nRuns <= 40) {
+        rating = "moyen";
+        ratingCol = COL(255, 220, 80);
+    } else {
+        rating = "lourd : peut ralentir le jeu";
+        ratingCol = COL(255, 140, 80);
+    }
+    snprintf(buf, sizeof buf, "Détail : %d rectangles (%s)", t->nRuns, rating);
+    drawText(buf, 10, 230, 0.4f, ratingCol);
 }
 
-static void drawCalibBottom(void) {
-    static const char *const names[3] = { "Haut / bas", "Couleurs", "Carrés de 8 x 8" };
-    Button b;
-    char buf[64];
+/* ---------- Dessin : outils de zone ---------- */
+
+static void drawZoneTop(void) {
+    Ov o = ovLayout(10, 10, 250, 150);
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    u32 yellow = COL(255, 220, 80);
+    char buf[96];
+    float ts;
+    int link, n = 0, nw, nh;
+
+    ovDraw(&o);
+    ovTeles(&o);
+    ts = (float)o.s / o.k;
+    if (ts < 3.0f)
+        ts = 3.0f;
+    C2D_DrawRectSolid(ovX(&o, (float)spawnTX) - 1, ovY(&o, (float)spawnTY) - 1,
+                      0.2f, ts + 2, ts + 2, white);
+    C2D_DrawRectSolid(ovX(&o, (float)spawnTX), ovY(&o, (float)spawnTY),
+                      0.21f, ts, ts, COL(220, 60, 60));
+
+    /* infos */
+    nw = mapW + zDelta[0] + zDelta[1];
+    nh = mapH + zDelta[2] + zDelta[3];
+    snprintf(buf, sizeof buf, "Zone %d / %d", curZone, zoneCount);
+    drawText(buf, 268, 10, 0.5f, white);
+    snprintf(buf, sizeof buf, "Taille : %d x %d", mapW, mapH);
+    drawText(buf, 268, 30, 0.42f, gray);
+    if (nw != mapW || nh != mapH) {
+        snprintf(buf, sizeof buf, "Après : %d x %d", nw, nh);
+        drawText(buf, 268, 46, 0.42f, yellow);
+    }
+    drawText("Nouvelles cases :", 268, 70, 0.4f, gray);
+    drawTile(editTile, 268, 86, 1.0f, 0.02f);
+    drawText(tiles[editTile].name, 290, 88, 0.42f, white);
+    drawText("L / R : changer", 268, 108, 0.4f, gray);
+    drawText("B : retour", 268, 122, 0.4f, gray);
+
+    if (zMsgTimer > 0)
+        drawText(zMsg, 10, 166, 0.45f, yellow);
+
+    /* liste des liens de teleporteurs */
+    drawText("Liens de téléporteurs :", 10, 180, 0.4f, gray);
+    for (link = 1; link <= MAX_LINK && n < 8; link++) {
+        int cnt = teleLinkCount(link), a = -1, b = -1, i;
+        u32 col = white;
+
+        if (cnt == 0)
+            continue;
+        for (i = 0; i < teleCount; i++) {
+            if (teles[i].link != link)
+                continue;
+            if (a < 0) a = i;
+            else if (b < 0) b = i;
+        }
+        if (cnt == 1) {
+            snprintf(buf, sizeof buf, "%d : Z%d (%d,%d) sans jumeau !", link,
+                     teles[a].zone, teles[a].x, teles[a].y);
+            col = COL(255, 150, 70);
+        } else if (cnt == 2) {
+            snprintf(buf, sizeof buf, "%d : Z%d (%d,%d) <> Z%d (%d,%d)", link,
+                     teles[a].zone, teles[a].x, teles[a].y,
+                     teles[b].zone, teles[b].x, teles[b].y);
+        } else {
+            snprintf(buf, sizeof buf, "%d : %d sorties en anneau", link, cnt);
+        }
+        drawText(buf, 10.0f + (n / 4) * 200, 194.0f + (n % 4) * 11, 0.36f, col);
+        n++;
+    }
+    if (n == 0)
+        drawText("(aucun : choisis l'outil T dans la palette de la carte)", 10, 194, 0.36f, gray);
+}
+
+static void drawZoneBottom(void) {
+    u32 white = COL(255, 255, 255);
+    u32 gray = COL(170, 170, 190);
+    char buf[48];
     int i;
 
-    b = caBtn[0];
-    snprintf(buf, sizeof buf, "Mode : %s", texMode ? "Rectangles (sûr)" : "Carte graphique (test)");
-    b.label = buf;
-    drawButtonSc(&b, texMode == 0, 0.55f);
+    snprintf(buf, sizeof buf, "Zone %d / %d", curZone, zoneCount);
+    drawText(buf, 10, 8, 0.6f, white);
+    drawText("Ajouter / retirer des cases :", 10, 27, 0.42f, gray);
 
-    for (i = 0; i < 3; i++) {
-        int v = (i == 0) ? texFlipV : (i == 1 ? texBswap : texSwapXY);
-        char line[48];
-        b = caBtn[i + 1];
-        snprintf(line, sizeof line, "%s : %s", names[i], v ? "inversé" : "normal");
-        b.label = line;
-        b.enabled = (texMode == 0);
-        drawButtonSc(&b, v != 0 && texMode == 0, 0.5f);
+    for (i = 0; i < 4; i++) {
+        float y = 44.0f + i * 34;
+        drawText(ZSIDE[i], 10, y + 5, 0.55f, white);
+        snprintf(buf, sizeof buf, "%+d", zDelta[i]);
+        drawTextCX(buf, 188, y + 4, 0.6f, zDelta[i] != 0 ? COL(255, 220, 80) : white);
+        drawButton(&zBtn[i * 2], false);
+        drawButton(&zBtn[i * 2 + 1], false);
     }
-    drawButton(&caOk, false);
-}
 
-/* ---------- Dessin : jeu ---------- */
-
-static void drawMapTop(void) {
-    int tx0 = camX / TS;
-    int ty0 = camY / TS;
-    int tx1 = (camX + TOP_W - 1) / TS;
-    int ty1 = (camY + TOP_H - 1) / TS;
-    int tx, ty;
-
-    if (tx1 >= MAP_W) tx1 = MAP_W - 1;
-    if (ty1 >= MAP_H) ty1 = MAP_H - 1;
-
-    for (ty = ty0; ty <= ty1; ty++)
-        for (tx = tx0; tx <= tx1; tx++)
-            drawTile(map[ty][tx], (float)(tx * TS - camX), (float)(ty * TS - camY), 0.0f, 1.0f);
+    for (i = ZB_APPLY; i < ZB_N; i++) {
+        Button b = zBtn[i];
+        if (i == ZB_DEL) {
+            b.label = (zDelTimer > 0) ? "Sûr ?" : "Suppr. zone";
+            b.enabled = (zoneCount > 1);
+        } else if (i == ZB_PREV) {
+            b.enabled = (curZone > 1);
+        } else if (i == ZB_NEXT) {
+            b.enabled = (curZone < zoneCount);
+        } else if (i == ZB_NEW) {
+            b.enabled = (zoneCount < MAX_ZONES);
+        }
+        drawButtonSc(&b, i == ZB_DEL && zDelTimer > 0, 0.5f);
+    }
 }
 
 /* ---------- Dessin : editeur de monstres ---------- */
@@ -4075,8 +4636,8 @@ static void drawFormBottom(void) {
 
 static void drawEdMenuTop(void) {
     static const char *const desc[N_ED_BUTTONS] = {
-        "Dessine la carte au stylet avec tes blocs.",
-        "Crée des blocs et dessine leurs textures pixel par pixel.",
+        "Dessine les zones au stylet. X : agrandir, nouvelle zone, téléporteurs.",
+        "Redessine les textures et crée tes propres blocs.",
         "Crée et modifie les monstres : stats, forme, classe, butin.",
         "Crée des classes : stats de départ, gain par niveau, 4 attaques.",
         "Crée des attaques : dégâts ou soin, puissance, précision.",
@@ -4092,7 +4653,6 @@ static void drawEdMenuTop(void) {
     snprintf(buf, sizeof buf, "%d monstres - %d classes - %d attaques - %d objets",
              monsterCount, classCount, attackCount, itemCount);
     drawTextCX(buf, TOP_W / 2, 150, 0.45f, COL(150, 160, 190));
-    drawTextCX("Y : réglage d'affichage des textures", TOP_W / 2, 200, 0.42f, COL(120, 130, 160));
 }
 
 static void drawEdMenuBottom(void) {
@@ -4355,7 +4915,7 @@ int main(int argc, char **argv) {
 
     gfxInitDefault();
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
-    C2D_Init(C2D_DEFAULT_MAX_OBJECTS * 2);
+    C2D_Init(C2D_DEFAULT_MAX_OBJECTS * 4);
     C2D_Prepare();
 
     top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
@@ -4363,11 +4923,10 @@ int main(int argc, char **argv) {
     g_textBuf = C2D_TextBufNew(4096);
 
     initTiles();
-    buildMap();
-    loadDisplay();
     loadTiles();
-    mapClampTiles();
-    atlasInit();
+    loadTeles();
+    zoneCount = countZones();
+    loadZone(1);
     loadAll();
 
     while (running && aptMainLoop()) {
@@ -4380,15 +4939,12 @@ int main(int argc, char **argv) {
         kHeld = hidKeysHeld();
 
         if (kDown & KEY_START) {
-            if (state == S_EDIT)
-                saveMap();
+            if (state == S_EDIT || state == S_ZONE)
+                saveWorld();
+            else if (state == S_TILEEDIT)
+                saveTiles();
             else if (state == S_FORM)
                 saveAll();
-            else if (state == S_BLOCKS) {
-                saveTiles();
-                saveMap();
-            } else if (state == S_CALIB)
-                saveDisplay();
             break;
         }
 
@@ -4404,19 +4960,14 @@ int main(int argc, char **argv) {
             updateBattle(kDown);
         else if (state == S_INV)
             updateInventory(kDown);
-        else if (state == S_BLOCKS)
-            updateBlocks(kDown, kHeld);
-        else if (state == S_CALIB)
-            updateCalib(kDown);
+        else if (state == S_TILEEDIT)
+            updateTileEd(kDown, kHeld);
+        else if (state == S_ZONE)
+            updateZone(kDown, kHeld);
         else
             updateEdit(kDown, kHeld);
 
-        if (atlasDirty) {
-            atlasFlush();
-            atlasDirty = false;
-        }
-        rectBudget = TILE_RECT_BUDGET;
-
+        rectBudget = DETAIL_BUDGET;
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C2D_TextBufClear(g_textBuf);
 
@@ -4471,22 +5022,22 @@ int main(int argc, char **argv) {
             C2D_TargetClear(bot, COL(30, 30, 40));
             C2D_SceneBegin(bot);
             drawInvBottom();
-        } else if (state == S_BLOCKS) {
+        } else if (state == S_TILEEDIT) {
             C2D_TargetClear(top, COL(18, 24, 48));
             C2D_SceneBegin(top);
-            drawBlocksTop();
+            drawTileEdTop();
 
             C2D_TargetClear(bot, COL(30, 30, 40));
             C2D_SceneBegin(bot);
-            drawBlocksBottom();
-        } else if (state == S_CALIB) {
+            drawTileEdBottom();
+        } else if (state == S_ZONE) {
             C2D_TargetClear(top, COL(18, 24, 48));
             C2D_SceneBegin(top);
-            drawCalibTop();
+            drawZoneTop();
 
             C2D_TargetClear(bot, COL(30, 30, 40));
             C2D_SceneBegin(bot);
-            drawCalibBottom();
+            drawZoneBottom();
         } else {
             C2D_TargetClear(top, COL(18, 24, 48));
             C2D_SceneBegin(top);
