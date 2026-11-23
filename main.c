@@ -95,12 +95,19 @@ static u32 palCol(int i) {
 /* les blocs de depart (leurs numeros servent aussi a la carte par defaut) */
 enum { T_GRASS, T_WALL, T_WATER, T_TREE, T_PATH, T_FLOOR, T_DOOR, T_TALL, T_COUNT };
 
+#define TILE_MAXRECT 256
+
+typedef struct { u8 x, y, w, h, c; } PRect;
+
 typedef struct {
     char name[TILE_NAME];
     bool solid;       /* bloque le joueur */
     bool tall;        /* hautes herbes : les monstres sauvages y apparaissent */
     u32 color;        /* couleur moyenne (mini-cartes) */
     u8 pix[16][16];   /* la texture : numeros de couleurs de la palette */
+    u8 base;          /* couleur la plus frequente (fond) */
+    u16 nrect;        /* nombre de rectangles a dessiner par-dessus le fond */
+    PRect r[TILE_MAXRECT];
 } Tile;
 
 static Tile tiles[MAX_TILES];
@@ -122,18 +129,62 @@ static void tileRect(Tile *t, int x, int y, int w, int h, int c) {
                 t->pix[yy][xx] = (u8)c;
 }
 
+/* recalcule tout ce qui depend des pixels : couleur moyenne et rectangles de dessin */
 static void tileRecolor(Tile *t) {
-    int x, y, r = 0, g = 0, b = 0;
+    int x, y, r = 0, g = 0, b = 0, best = 0;
+    int hist[32];
+    bool used[16][16];
 
+    memset(hist, 0, sizeof hist);
     for (y = 0; y < 16; y++) {
         for (x = 0; x < 16; x++) {
             const u8 *p = PAL[t->pix[y][x] & 31];
             r += p[0];
             g += p[1];
             b += p[2];
+            hist[t->pix[y][x] & 31]++;
         }
     }
     t->color = COL(r / 256, g / 256, b / 256);
+
+    /* fond = couleur la plus frequente ; le reste est decoupe en rectangles */
+    for (x = 1; x < 32; x++)
+        if (hist[x] > hist[best])
+            best = x;
+    t->base = (u8)best;
+    t->nrect = 0;
+    memset(used, 0, sizeof used);
+    for (y = 0; y < 16; y++) {
+        for (x = 0; x < 16; x++) {
+            int c, w, h, xx, yy;
+
+            if (used[y][x] || (t->pix[y][x] & 31) == best)
+                continue;
+            c = t->pix[y][x] & 31;
+            w = 1;
+            while (x + w < 16 && !used[y][x + w] && (t->pix[y][x + w] & 31) == c)
+                w++;
+            h = 1;
+            for (;;) {
+                bool ok = (y + h < 16);
+                for (xx = x; ok && xx < x + w; xx++)
+                    if (used[y + h][xx] || (t->pix[y + h][xx] & 31) != c)
+                        ok = false;
+                if (!ok)
+                    break;
+                h++;
+            }
+            for (yy = y; yy < y + h; yy++)
+                for (xx = x; xx < x + w; xx++)
+                    used[yy][xx] = true;
+            t->r[t->nrect].x = (u8)x;
+            t->r[t->nrect].y = (u8)y;
+            t->r[t->nrect].w = (u8)w;
+            t->r[t->nrect].h = (u8)h;
+            t->r[t->nrect].c = (u8)c;
+            t->nrect++;
+        }
+    }
 }
 
 static void tileSet(Tile *t, const char *name, bool solid, bool tall, int base) {
@@ -211,6 +262,12 @@ static Tex3DS_SubTexture atlasSub[ATLAS_SLOTS];
 static bool atlasOK = false;
 static bool atlasDirty = false;
 static u8 testPix[16][16];
+static Tile testTile;   /* le motif de test, pour le mode rectangles */
+
+/* mode d'affichage : 1 = rectangles (sur, par defaut), 0 = textures de la carte graphique */
+static int texMode = 1;
+#define TILE_RECT_BUDGET 5500
+static int rectBudget = TILE_RECT_BUDGET;   /* rectangles autorises par image */
 
 /* position d'un point dans un carre de 8x8 (ordre en Z utilise par la console) */
 static u32 mortonIndex(u32 x, u32 y) {
@@ -299,6 +356,10 @@ static void atlasInit(void) {
         }
     }
 
+    memset(&testTile, 0, sizeof testTile);
+    memcpy(testTile.pix, testPix, sizeof testPix);
+    tileRecolor(&testTile);
+
     atlasOK = C3D_TexInit(&atlasTex, ATLAS_W, ATLAS_H, GPU_RGBA8);
     if (!atlasOK)
         return;
@@ -308,17 +369,44 @@ static void atlasInit(void) {
     atlasRebuild();
 }
 
-/* dessine la case "slot" de l'image (scale = agrandissement) */
-static void drawSlot(int slot, float x, float y, float z, float scale) {
-    if (atlasOK) {
-        C2D_Image img;
-        img.tex = &atlasTex;
-        img.subtex = &atlasSub[slot];
-        C2D_DrawImageAt(img, x, y, z, NULL, scale, scale);
-    } else {
-        C2D_DrawRectSolid(x, y, z, TS * scale, TS * scale,
-                          (slot < tileCount) ? tiles[slot].color : COL(120, 120, 130));
+/* mode sur : un fond + quelques rectangles. Si l'image demande trop de rectangles,
+ * les derniers blocs dessines sont remplaces par leur couleur moyenne (le jeu ne ralentit pas). */
+static void drawTileRects(const Tile *t, float x, float y, float z, float s) {
+    int i;
+
+    if ((int)t->nrect + 1 > rectBudget) {
+        C2D_DrawRectSolid(x, y, z, TS * s, TS * s, t->color);
+        rectBudget--;
+        return;
     }
+    rectBudget -= (int)t->nrect + 1;
+    C2D_DrawRectSolid(x, y, z, TS * s, TS * s, palCol(t->base));
+    for (i = 0; i < (int)t->nrect; i++) {
+        const PRect *r = &t->r[i];
+        C2D_DrawRectSolid(x + r->x * s, y + r->y * s, z + 0.01f, r->w * s, r->h * s, palCol(r->c));
+    }
+}
+
+/* mode textures de la carte graphique */
+static bool drawSlotGPU(int slot, float x, float y, float z, float scale) {
+    C2D_Image img;
+
+    if (!atlasOK)
+        return false;
+    img.tex = &atlasTex;
+    img.subtex = &atlasSub[slot];
+    C2D_DrawImageAt(img, x, y, z, NULL, scale, scale);
+    return true;
+}
+
+/* dessine la case "slot" (scale = agrandissement) */
+static void drawSlot(int slot, float x, float y, float z, float scale) {
+    if (texMode == 0 && drawSlotGPU(slot, x, y, z, scale))
+        return;
+    if (slot == TEST_SLOT)
+        drawTileRects(&testTile, x, y, z, scale);
+    else if (slot < tileCount)
+        drawTileRects(&tiles[slot], x, y, z, scale);
 }
 
 static void drawTile(int idx, float x, float y, float z, float scale) {
@@ -328,12 +416,13 @@ static void drawTile(int idx, float x, float y, float z, float scale) {
 }
 
 static void saveDisplay(void) {
-    u8 b[7] = { 'R', 'P', 'G', 'D', 0, 0, 0 };
+    u8 b[8] = { 'R', 'P', 'G', 'D', 0, 0, 0, 1 };
     FILE *f;
 
     b[4] = (u8)texFlipV;
     b[5] = (u8)texBswap;
     b[6] = (u8)texSwapXY;
+    b[7] = (u8)texMode;
     mkdir("sdmc:/3ds", 0777);
     mkdir(SAVE_DIR, 0777);
     f = fopen(DISPLAY_FILE, "wb");
@@ -344,12 +433,13 @@ static void saveDisplay(void) {
 }
 
 static void loadDisplay(void) {
-    u8 b[7];
+    u8 b[8] = { 0, 0, 0, 0, 0, 0, 0, 1 };
     FILE *f = fopen(DISPLAY_FILE, "rb");
 
     if (f == NULL)
         return;
-    if (fread(b, 1, sizeof b, f) == sizeof b && memcmp(b, "RPGD", 4) == 0) {
+    if (fread(b, 1, sizeof b, f) >= 7 && memcmp(b, "RPGD", 4) == 0) {
+        texMode = b[7] ? 1 : 0;
         texFlipV = b[4] ? 1 : 0;
         texBswap = b[5] ? 1 : 0;
         texSwapXY = b[6] ? 1 : 0;
@@ -2871,12 +2961,13 @@ static void updateBlocks(u32 kDown, u32 kHeld) {
 
 /* ---------- Reglage d'affichage des textures ---------- */
 
-static Button caBtn[3] = {
-    { 6,  44, 308, 34, "", true },
-    { 6,  86, 308, 34, "", true },
-    { 6, 128, 308, 34, "", true },
+static Button caBtn[4] = {
+    { 6,  34, 308, 32, "", true },
+    { 6,  74, 308, 30, "", true },
+    { 6, 110, 308, 30, "", true },
+    { 6, 146, 308, 30, "", true },
 };
-static Button caOk = { 6, 190, 308, 40, "Terminé", true };
+static Button caOk = { 6, 192, 308, 38, "Terminé", true };
 
 static void updateCalib(u32 kDown) {
     touchPosition t;
@@ -2889,10 +2980,14 @@ static void updateCalib(u32 kDown) {
     }
     if (kDown & KEY_TOUCH) {
         hidTouchRead(&t);
-        for (i = 0; i < 3; i++) {
-            if (inRect(&caBtn[i], t.px, t.py)) {
-                if (i == 0)      texFlipV = !texFlipV;
-                else if (i == 1) texBswap = !texBswap;
+        for (i = 0; i < 4; i++) {
+            if (!inRect(&caBtn[i], t.px, t.py))
+                continue;
+            if (i == 0) {
+                texMode = !texMode;
+            } else if (texMode == 0) {   /* ces trois reglages ne servent qu'au mode "carte graphique" */
+                if (i == 1)      texFlipV = !texFlipV;
+                else if (i == 2) texBswap = !texBswap;
                 else             texSwapXY = !texSwapXY;
                 atlasRebuild();
             }
@@ -3554,38 +3649,42 @@ static void drawCalibTop(void) {
     u32 white = COL(255, 255, 255);
     u32 gray = COL(170, 170, 190);
 
-    drawTextCX("Réglage d'affichage des textures", TOP_W / 2, 6, 0.6f, white);
+    drawTextCX("Réglage d'affichage des textures", TOP_W / 2, 4, 0.6f, white);
 
-    C2D_DrawRectSolid(16, 36, 0.0f, 136, 136, COL(70, 70, 85));
-    drawSlot(TEST_SLOT, 20, 40, 0.3f, 8.0f);
+    /* a gauche : la reference (toujours juste) ; a droite : le rendu de la carte graphique */
+    drawText("Référence", 18, 30, 0.45f, gray);
+    C2D_DrawRectSolid(14, 50, 0.0f, 136, 136, COL(70, 70, 85));
+    drawTileRects(&testTile, 18, 54, 0.3f, 8.0f);
 
-    drawText("Résultat attendu :", 170, 40, 0.45f, white);
-    drawText("ROUGE en haut à gauche", 170, 60, 0.42f, gray);
-    drawText("VERT en haut à droite", 170, 74, 0.42f, gray);
-    drawText("BLEU en bas à gauche", 170, 88, 0.42f, gray);
-    drawText("JAUNE en bas à droite", 170, 102, 0.42f, gray);
-    drawText("et une barre NOIRE au bord", 170, 122, 0.42f, gray);
-    drawText("GAUCHE de chaque carré.", 170, 136, 0.42f, gray);
+    drawText("Rendu carte graphique", 214, 30, 0.45f, gray);
+    C2D_DrawRectSolid(210, 50, 0.0f, 136, 136, COL(70, 70, 85));
+    if (!drawSlotGPU(TEST_SLOT, 214, 54, 0.3f, 8.0f))
+        drawText("indisponible", 232, 110, 0.5f, gray);
 
-    drawText("Si ce n'est pas le cas, touche les boutons", 10, 186, 0.42f, gray);
-    drawText("du bas jusqu'à ce que ça le soit, puis", 10, 200, 0.42f, gray);
-    drawText("touche « Terminé ». Tout est réglé pour de bon.", 10, 214, 0.42f, gray);
+    drawText("Le mode « Rectangles » marche toujours. Pour essayer le mode", 10, 196, 0.4f, gray);
+    drawText("« Carte graphique » : le carré de droite doit être identique à", 10, 210, 0.4f, gray);
+    drawText("celui de gauche (touche les réglages jusqu'à y arriver).", 10, 224, 0.4f, gray);
 }
 
 static void drawCalibBottom(void) {
     static const char *const names[3] = { "Haut / bas", "Couleurs", "Carrés de 8 x 8" };
     Button b;
-    char buf[48];
+    char buf[64];
     int i;
 
-    drawTextCX("Touche un bouton pour le changer", BOT_W / 2, 14, 0.5f, COL(200, 210, 255));
+    b = caBtn[0];
+    snprintf(buf, sizeof buf, "Mode : %s", texMode ? "Rectangles (sûr)" : "Carte graphique (test)");
+    b.label = buf;
+    drawButtonSc(&b, texMode == 0, 0.55f);
 
     for (i = 0; i < 3; i++) {
         int v = (i == 0) ? texFlipV : (i == 1 ? texBswap : texSwapXY);
-        b = caBtn[i];
-        snprintf(buf, sizeof buf, "%s : %s", names[i], v ? "inversé" : "normal");
-        b.label = buf;
-        drawButtonSc(&b, v != 0, 0.55f);
+        char line[48];
+        b = caBtn[i + 1];
+        snprintf(line, sizeof line, "%s : %s", names[i], v ? "inversé" : "normal");
+        b.label = line;
+        b.enabled = (texMode == 0);
+        drawButtonSc(&b, v != 0 && texMode == 0, 0.5f);
     }
     drawButton(&caOk, false);
 }
@@ -4316,6 +4415,7 @@ int main(int argc, char **argv) {
             atlasFlush();
             atlasDirty = false;
         }
+        rectBudget = TILE_RECT_BUDGET;
 
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C2D_TextBufClear(g_textBuf);
